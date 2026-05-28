@@ -13,7 +13,6 @@ pub async fn downloader(config: &Config) -> Result<(), AppError> {
 
     let symbols = task::symbols::resolve_symbols(
         &config.symbols,
-        &client,
         &config.market_type,
         &config.data_dir,
     )

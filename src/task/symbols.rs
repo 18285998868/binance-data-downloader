@@ -13,7 +13,6 @@ const CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 pub async fn resolve_symbols(
     symbols: &Option<Vec<String>>,
-    client: &reqwest::Client,
     market_types: &[MarketType],
     data_dir: &Path,
 ) -> Result<Vec<String>, crate::AppError> {
@@ -30,7 +29,6 @@ pub async fn resolve_symbols(
     let store = store::Store::open_async(&cache_dir).await?;
 
     let results: Vec<Vec<String>> = try_join_all(market_types.iter().map(|&mt| {
-        let c = client.clone();
         let store = Arc::clone(&store);
         async move {
             let key = format!("symbols_{}", mt.as_tag());
@@ -41,7 +39,7 @@ pub async fn resolve_symbols(
                 return Ok::<_, crate::AppError>(data);
             }
 
-            let symbols = fetch_trading_symbols(&c, mt).await?;
+            let symbols = fetch_trading_symbols(mt).await?;
             let _ = store::set_cached(&store, &key, symbols.clone(), CACHE_TTL).await;
             Ok(symbols)
         }
@@ -54,55 +52,22 @@ pub async fn resolve_symbols(
     Ok(all)
 }
 
-#[derive(serde::Deserialize)]
-struct ExchangeInfo {
-    symbols: Vec<SymbolInfo>,
-}
-#[derive(serde::Deserialize)]
-struct SymbolInfo {
-    symbol: String,
-    status: String,
-}
-
-async fn fetch_trading_symbols(
-    client: &reqwest::Client,
-    mt: MarketType,
-) -> Result<Vec<String>, crate::AppError> {
-    let url = match mt {
-        MarketType::Spot => "https://api.binance.com/api/v3/exchangeInfo",
-        MarketType::Futures => "https://fapi.binance.com/fapi/v1/exchangeInfo",
+async fn fetch_trading_symbols(mt: MarketType) -> Result<Vec<String>, crate::AppError> {
+    let market = match mt {
+        MarketType::Spot => common::venue::binance::Market::Spot,
+        MarketType::Futures => common::venue::binance::Market::Futures,
     };
 
     let op = || {
-        let c = client.clone();
         async move {
-            let r = match c.get(url).send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(BackoffError::Transient {
-                        err: crate::AppError::from(e),
+            common::venue::binance::exchange_info(market, None)
+                .await
+                .map_err(|e| {
+                    BackoffError::Transient {
+                        err: crate::AppError::Data(e.to_string()),
                         retry_after: None,
-                    });
-                }
-            };
-            let t = match r.text().await {
-                Ok(t) => t,
-                Err(e) => {
-                    return Err(BackoffError::Transient {
-                        err: crate::AppError::from(e),
-                        retry_after: None,
-                    });
-                }
-            };
-            let info: ExchangeInfo = match serde_json::from_str(&t) {
-                Ok(info) => info,
-                Err(e) => {
-                    return Err(BackoffError::Permanent(crate::AppError::Data(format!(
-                        "exchangeInfo: {e}"
-                    ))));
-                }
-            };
-            Ok(info)
+                    }
+                })
         }
     };
 

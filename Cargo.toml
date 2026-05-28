@@ -16,13 +16,14 @@ toml = { workspace = true }
 polars = { workspace = true }
 zip = { workspace = true }
 walkdir = { workspace = true }
-data-clean = { path = "../data-clean" }
 chrono = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 env_logger = { workspace = true }
 
 backoff = { version = "0.4", features = ["tokio"] }
+common = { path = "../common" }
+
 
 [dev-dependencies]
 tempfile = { workspace = true }

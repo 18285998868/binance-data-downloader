@@ -3,7 +3,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("Data clean error: {0}")]
-    DataClean(#[from] data_clean::Error),
+    DataClean(#[from] common::data_clean::Error),
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
