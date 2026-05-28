@@ -1,0 +1,28 @@
+[package]
+name = "data-downloader"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+cached = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+polars = { workspace = true }
+zip = { workspace = true }
+walkdir = { workspace = true }
+data-clean = { path = "../data-clean" }
+chrono = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+env_logger = { workspace = true }
+
+backoff = { version = "0.4", features = ["tokio"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
