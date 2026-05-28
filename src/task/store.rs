@@ -2,6 +2,7 @@ use cached::ConcurrentCached;
 use cached::stores::DiskCache;
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// File-backed cache using `cached::DiskCache` (sled).
@@ -47,35 +48,45 @@ impl Store {
         Ok(())
     }
 
-    /// Async cache read, offloads blocking sled I/O via `spawn_blocking`.
-    pub async fn get_async<T: DeserializeOwned + Send + 'static>(
-        dir: &Path,
-        key: &str,
-    ) -> Result<Option<T>, crate::AppError> {
+    /// Opens store in `spawn_blocking`, returns `Arc` for sharing across async tasks.
+    pub async fn open_async(dir: &Path) -> Result<Arc<Self>, crate::AppError> {
         let dir = dir.to_path_buf();
-        let key = key.to_string();
-        tokio::task::spawn_blocking(move || {
-            let store = Self::open(&dir)?;
-            store.get_cached(&key)
-        })
-        .await
-        .map_err(|e| crate::AppError::Join(format!("spawn_blocking: {e}")))?
+        tokio::task::spawn_blocking(move || Self::open(&dir))
+            .await
+            .map_err(|e| crate::AppError::Join(format!("spawn_blocking: {e}")))?
+            .map(Arc::new)
     }
+}
 
-    /// Async cache write, offloads blocking sled I/O via `spawn_blocking`.
-    pub async fn set_async<T: Serialize + Send + 'static>(
-        dir: &Path,
-        key: &str,
-        value: T,
-        ttl: Duration,
-    ) -> Result<(), crate::AppError> {
-        let dir = dir.to_path_buf();
-        let key = key.to_string();
-        tokio::task::spawn_blocking(move || {
-            let store = Self::open(&dir)?;
-            store.set_cached(&key, &value, ttl)
-        })
+// ---------------------------------------------------------------------------
+// Async wrappers that reuse a single `Arc<Store>` (sled opened once).
+// ---------------------------------------------------------------------------
+
+/// Async cache read, offloads blocking sled I/O via `spawn_blocking`.
+pub async fn get_cached<T>(store: &Arc<Store>, key: &str) -> Result<Option<T>, crate::AppError>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    let store = Arc::clone(store);
+    let key = key.to_string();
+    tokio::task::spawn_blocking(move || store.get_cached(&key))
         .await
         .map_err(|e| crate::AppError::Join(format!("spawn_blocking: {e}")))?
-    }
+}
+
+/// Async cache write, offloads blocking sled I/O via `spawn_blocking`.
+pub async fn set_cached<T>(
+    store: &Arc<Store>,
+    key: &str,
+    value: T,
+    ttl: Duration,
+) -> Result<(), crate::AppError>
+where
+    T: Serialize + Send + 'static,
+{
+    let store = Arc::clone(store);
+    let key = key.to_string();
+    tokio::task::spawn_blocking(move || store.set_cached(&key, &value, ttl))
+        .await
+        .map_err(|e| crate::AppError::Join(format!("spawn_blocking: {e}")))?
 }

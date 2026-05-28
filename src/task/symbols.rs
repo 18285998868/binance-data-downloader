@@ -3,9 +3,10 @@ use backoff::ExponentialBackoff;
 use backoff::future::retry;
 use futures::future::try_join_all;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use super::store::Store;
+use super::store;
 use crate::config::market_type::MarketType;
 
 const CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -26,20 +27,22 @@ pub async fn resolve_symbols(
     }
 
     let cache_dir = data_dir.join(".cache");
+    let store = store::Store::open_async(&cache_dir).await?;
+
     let results: Vec<Vec<String>> = try_join_all(market_types.iter().map(|&mt| {
         let c = client.clone();
-        let cd = cache_dir.clone();
+        let store = Arc::clone(&store);
         async move {
             let key = format!("symbols_{}", mt.as_tag());
 
-            if let Ok(Some(data)) = Store::get_async::<Vec<String>>(&cd, &key).await
+            if let Ok(Some(data)) = store::get_cached::<Vec<String>>(&store, &key).await
                 && !data.is_empty()
             {
                 return Ok::<_, crate::AppError>(data);
             }
 
             let symbols = fetch_trading_symbols(&c, mt).await?;
-            let _ = Store::set_async(&cd, &key, symbols.clone(), CACHE_TTL).await;
+            let _ = store::set_cached(&store, &key, symbols.clone(), CACHE_TTL).await;
             Ok(symbols)
         }
     }))

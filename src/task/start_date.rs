@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use super::store::Store;
+use super::store;
 use crate::config::market_type::MarketType;
 
 const CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -24,13 +24,15 @@ pub async fn resolve_start_dates(
     data_dir: &Path,
 ) -> Result<StartDateMap, crate::AppError> {
     let cache_dir = data_dir.join(".cache");
+    let store = store::Store::open_async(&cache_dir).await?;
+
     let mut map = HashMap::new();
     let mut misses: Vec<(String, MarketType)> = Vec::new();
 
     for pair in symbols {
         for &mt in market_types {
             let key = start_date_key(mt, pair);
-            if let Ok(Some(d)) = Store::get_async::<String>(&cache_dir, &key).await
+            if let Ok(Some(d)) = store::get_cached::<String>(&store, &key).await
                 && let Ok(date) = chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d")
             {
                 map.insert(key, date);
@@ -54,8 +56,8 @@ pub async fn resolve_start_dates(
 
         for (pair, mt, date) in &fetched {
             let key = start_date_key(*mt, pair);
-            let _ = Store::set_async(
-                &cache_dir,
+            let _ = store::set_cached(
+                &store,
                 &key,
                 date.format("%Y-%m-%d").to_string(),
                 CACHE_TTL,
