@@ -11,6 +11,11 @@ use crate::config::market_type::MarketType;
 
 const CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// Resolves the list of symbols to download.
+///
+/// If `symbols` is `Some` and non-empty, returns it directly.
+/// Otherwise fetches all TRADING symbols from Binance exchangeInfo
+/// API with exponential backoff, cached in sled with a 7-day TTL.
 pub async fn resolve_symbols(
     symbols: &Option<Vec<String>>,
     market_types: &[MarketType],

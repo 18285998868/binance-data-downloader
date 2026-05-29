@@ -1,55 +1,97 @@
-# Binance Data Downloader
+# 介绍
 
 从 Binance Public Data 下载历史 K 线数据，解压 CSV 并转换为 Parquet 格式。
 
 # 配置
 
 ```toml
-# market_type = ["futures"]              # ["spot", "futures"]
-# max_concurrent = 1000                   # 最大并发数
-# data_dir = "./data"                    # 数据存储目录
-# symbols = ["BTCUSDT", "ETHUSDT"]     # 留空则自动获取所有 TRADING 交易对
-# timeframes = ["1m", "5m", "15m"]     # 默认 12 个周期
-# proxy_url = "http://127.0.0.1:7890"
-# start_date = "2020-01-01"            # 默认从交易所获取
-# end_date = "2025-01-01"              # 默认昨天
-# log_level = "info"                   # 默认 "debug"
+proxy_url = "socks5h://127.0.0.1:7890"
+# market_type = ["futures"]
+# max_concurrent = 1000
+# data_dir = "./data"
+# symbols = ["BTCUSDT", "ETHUSDT"]
+# timeframes = ["1m", "5m", "15m"]
+# start_date = "2020-01-01"
+# end_date = "2025-01-01"
+# log_level = "info"
 ```
 
 # 执行流程
 
+```mermaid
+flowchart LR
+  A[读取 download.toml] --> B[解析 Config]
+  B --> C[构建 reqwest Client]
+  C --> D{有 proxy_url?}
+  D -->|是| E[添加代理]
+  D -->|否| F[返回 Client]
 ```
-binance-data-downloader/
-  Cargo.toml
-  download.toml
-  src/
-    main.rs                              # 入口: 加载配置 → downloader()
-    lib.rs                               # downloader() 编排: 分批构建任务 → 下载 → 转换
-    error.rs                             # AppError (thiserror)
-    clean.rs                             # 清理中断残留的 .tmp 文件
-    config/
-      mod.rs                             # 导出 Config, MarketType
-      def.rs                             # Config 结构体 + 默认值 + load()
-      market_type.rs                     # MarketType 枚举 (Spot/Futures)
-    task/
-      mod.rs                             # DownloadTask + build_tasks()
-      store.rs                           # DiskCache (sled) + async wrapper
-      symbols.rs                         # 交易对解析 (exchangeInfo API + backoff)
-      start_date.rs                      # 起始日期解析 (klines API + backoff)
-      urls.rs                            # URL 生成 (symbol×type×tf×date 笛卡尔积)
-      local_file.rs                      # 扫描本地已下载文件
-    downloader/
-      mod.rs                             # run_downloads() + pipeline_inner()
-      http.rs                            # HTTP GET + backoff 重试
-      extract_zip_from_bytes.rs          # 从 ZIP 字节提取 CSV
-      csv_to_dataframe/
-        mod.rs                           # CSV → DataFrame
-        table_title.rs                   # 列名检测
-        set_column_types.rs              # 类型转换 (Int64/Float64)
-      data_clean/
-        mod.rs                           # re-export data_clean::clean_dataframe
-      dataframe_to_parquet.rs            # 原子写入 Parquet (.tmp → rename)
 
+```mermaid
+flowchart LR
+  A[开始] --> B{配置指定了 symbols?}
+  B -->|是| C[直接使用]
+  B -->|否| D[调用 exchangeInfo API]
+  D --> E[过滤 TRADING 状态]
+  E --> F[sled 缓存 7d]
+  F --> G[对每个 symbol<br>查询首根 K 线时间]
+  G --> H[缓存 start_date]
+  H --> I[返回 symbols + start_dates]
+```
+
+```mermaid
+flowchart LR
+  A[分批 symbols / 每批 20] --> B[按 30 天分块]
+  B --> C[遍历 symbol×type×tf×date]
+  C --> D[生成 URL]
+  D --> E{本地已下载?}
+  E -->|是| F[跳过]
+  E -->|否| G[构建 DownloadTask<br>url + dest + pair + tf]
+  G --> H[返回任务列表]
+```
+
+```mermaid
+flowchart LR
+  A[DownloadTask 列表] --> B[futures buffer_unordered<br>max_concurrent]
+  B --> C[HTTP GET]
+  C --> D{状态码?}
+  D -->|200| E[返回字节]
+  D -->|404| F[Permanent 结束]
+  D -->|其他/网络错误| G[ExponentialBackoff 重试]
+  G --> C
+```
+
+```mermaid
+flowchart LR
+  A[ZIP 字节] --> B[打开 ZipArchive]
+  B --> C[遍历 entries]
+  C --> D{是目录?}
+  D -->|是| E[跳过]
+  D -->|否| F{扩展名 .csv?}
+  F -->|否| G[继续]
+  F -->|是| H[读取 CSV 字节]
+  H --> I[返回 CSV]
+```
+
+```mermaid
+flowchart LR
+  A[CSV 字节] --> B{有列名行?}
+  B -->|是| C[直接解析]
+  B -->|否| D[添加默认列名]
+  C --> E[Polars DataFrame]
+  D --> E
+  E --> F[列类型转换<br>Int64 / Float64]
+  F --> G[数据清洗<br>common::data_clean]
+  G --> H[返回 DataFrame]
+```
+
+```mermaid
+flowchart LR
+  A[DataFrame] --> B[创建父目录]
+  B --> C[写入 .parquet.tmp]
+  C --> D[ParquetWriter 序列化]
+  D --> E[rename 原子替换]
+  E --> F[清理残留 .tmp]
 ```
 
 # 用法

@@ -53,6 +53,7 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Loads and parses `download.toml` from the given manifest directory.
     pub fn load(manifest_dir: &str) -> Result<Self, AppError> {
         let path = Path::new(manifest_dir).join("download.toml");
         let content = std::fs::read_to_string(path)?;

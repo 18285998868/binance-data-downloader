@@ -1,6 +1,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+/// Scans `data_dir` recursively for existing `.zip` and `.parquet` files.
+///
+/// Returns a set of normalized paths (with extensions stripped) so the
+/// downloader can skip files already on disk.
 pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, crate::AppError> {
     let dir = data_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {

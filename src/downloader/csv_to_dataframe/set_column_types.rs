@@ -78,7 +78,6 @@ mod tests {
         )
         .unwrap();
         let converted = super::convert_types(&df).unwrap();
-        // source file had no ignore column — it's just not present
         assert_eq!(converted.width(), 2);
     }
 }

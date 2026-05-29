@@ -1,0 +1,16 @@
+[package]
+name = "data-clean"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+polars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+walkdir = { workspace = true }
+anyhow = { workspace = true }

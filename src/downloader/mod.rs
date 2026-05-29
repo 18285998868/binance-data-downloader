@@ -7,6 +7,7 @@ pub mod http;
 use crate::task::DownloadTask;
 use futures::stream::{self, StreamExt};
 
+/// Downloads and processes a batch of tasks with bounded concurrency.
 pub async fn run_downloads(
     client: &reqwest::Client,
     tasks: Vec<DownloadTask>,
@@ -16,10 +17,10 @@ pub async fn run_downloads(
     if total == 0 {
         return Ok(());
     }
-    log::debug!(
-        "downloading {} new files with concurrency={}",
-        total,
-        max_concurrent
+    tracing::debug!(
+        total = total,
+        concurrency = max_concurrent,
+        "downloading new files",
     );
     let results: Vec<_> = stream::iter(tasks.into_iter().map(|t| {
         let c = client.clone();
@@ -36,10 +37,10 @@ pub async fn run_downloads(
         .count();
     let fail = results.len() - ok - nf;
     if nf > 0 {
-        log::debug!(
-            "{} / {} files not found on server (404, expected for edge dates)",
-            nf,
-            total
+        tracing::debug!(
+            not_found = nf,
+            total = total,
+            "files not found on server (404, expected for edge dates)",
         );
     }
 
@@ -48,7 +49,7 @@ pub async fn run_downloads(
             if let Err(e) = r
                 && !matches!(e, crate::AppError::NotFound { .. })
             {
-                log::warn!("download failed: {e}");
+                tracing::warn!("download failed: {e}");
             }
         }
         return Err(crate::AppError::DownloadFailed {

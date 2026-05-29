@@ -15,6 +15,9 @@ const DEFAULT_COLUMNS: [&str; 12] = [
 ];
 
 /// Generates a default CSV header row for `count` columns.
+///
+/// For 11 or 12 columns, uses known Binance kline names.
+/// For any other count, generates generic `column_N` names.
 pub fn default_header(count: usize) -> Vec<String> {
     match count {
         11 | 12 => DEFAULT_COLUMNS[..count.min(DEFAULT_COLUMNS.len())]
@@ -26,6 +29,8 @@ pub fn default_header(count: usize) -> Vec<String> {
 }
 
 /// Detects whether the raw CSV bytes include a header row.
+///
+/// Checks if the first field of the first line is non-numeric.
 pub fn detect_header(bytes: &[u8]) -> bool {
     let mut lines = bytes.split(|b| *b == b'\n');
     let first = match lines.next() {

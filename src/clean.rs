@@ -9,9 +9,9 @@ pub async fn cleanup_tmp(data_dir: &Path) {
                 && entry.path().extension().is_some_and(|x| x == "tmp")
                 && let Err(err) = std::fs::remove_file(entry.path())
             {
-                log::warn!(
-                    "failed to remove tmp file {}: {err}",
-                    entry.path().display()
+                tracing::warn!(
+                    path = %entry.path().display(),
+                    "failed to remove tmp file: {err}",
                 );
             }
         }

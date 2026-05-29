@@ -3,12 +3,16 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("Data clean error: {0}")]
-    DataClean(#[from] common::data_clean::Error),
+    DataClean(#[from] data_clean::Error),
+
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 
     #[error("API error: {0}")]
     Api(String),

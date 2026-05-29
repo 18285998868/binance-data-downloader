@@ -4,6 +4,10 @@ use backoff::future::retry;
 
 use crate::task::DownloadTask;
 
+/// Downloads a ZIP file with exponential backoff retry.
+///
+/// Returns `NotFound` on HTTP 404 (permanent, no retry).
+/// All other failures are retried with exponential backoff.
 pub async fn download_bytes_with_retry(
     client: &reqwest::Client,
     task: &DownloadTask,

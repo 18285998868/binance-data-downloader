@@ -1,32 +1,37 @@
-#[tokio::main]
-async fn main() -> Result<(), data_downloader::AppError> {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let config = data_downloader::config::Config::load(manifest).unwrap_or_else(|e| {
-        eprintln!("config error: {e}");
-        std::process::exit(1);
-    });
+use anyhow::Context;
+use tracing_subscriber::EnvFilter;
 
-    let log_level = config
-        .log_level
-        .parse::<log::LevelFilter>()
-        .unwrap_or(log::LevelFilter::Debug);
-    let _ = env_logger::Builder::new()
-        .filter_level(log_level)
-        .try_init();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let config_path = std::env::var("DOWNLOADER_CONFIG")
+        .unwrap_or_else(|_| manifest.to_string());
+
+    let config = data_downloader::config::Config::load(&config_path)
+        .context("failed to load config")?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(&config.log_level)),
+        )
+        .init();
 
     let symbols_count = match &config.symbols {
-        Some(s) => format!("{}", s.len()),
+        Some(s) => s.len().to_string(),
         None => "auto".into(),
     };
     let tf_count = config.timeframes.as_ref().map(|t| t.len()).unwrap_or(0);
-    log::info!(
-        "config loaded: symbols={symbols_count} timeframes={tf_count} market_types={:?} data_dir={}",
-        config.market_type,
-        config.data_dir.display(),
+    tracing::info!(
+        symbols = symbols_count,
+        timeframes = tf_count,
+        market_types = ?config.market_type,
+        data_dir = %config.data_dir.display(),
+        "config loaded",
     );
-    log::info!("starting binance data downloader");
+    tracing::info!("starting binance data downloader");
     data_downloader::downloader(&config).await?;
-    log::info!("all done");
+    tracing::info!("all done");
 
     Ok(())
 }

@@ -11,12 +11,18 @@ use crate::config::market_type::MarketType;
 
 const CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// Maps `market_type:symbol` keys to their earliest available date.
 pub type StartDateMap = HashMap<String, chrono::NaiveDate>;
 
+/// Builds the cache key for a (market_type, symbol) pair.
 pub fn start_date_key(mt: MarketType, pair: &str) -> String {
     format!("{}:{}", mt.as_tag(), pair)
 }
 
+/// Resolves the earliest available date for each symbol on each market type.
+///
+/// Reads from sled cache first; fetches from Binance klines API
+/// (with backoff) for any missing entries, then caches the result.
 pub async fn resolve_start_dates(
     symbols: &[String],
     client: &reqwest::Client,
@@ -70,6 +76,8 @@ pub async fn resolve_start_dates(
     Ok(map)
 }
 
+/// Calls Binance klines API with `startTime=0` to get the first
+/// available kline date for a (market_type, symbol) pair.
 async fn fetch_first_date(
     client: &reqwest::Client,
     mt: MarketType,

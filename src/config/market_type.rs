@@ -9,6 +9,7 @@ pub enum MarketType {
 }
 
 impl MarketType {
+    /// Returns the path prefix used in Binance public data URL structure.
     pub fn rel_path_prefix(self) -> &'static str {
         match self {
             MarketType::Spot => "spot/daily/klines",
@@ -16,6 +17,7 @@ impl MarketType {
         }
     }
 
+    /// Returns a short tag string for cache keys and logging.
     pub fn as_tag(self) -> &'static str {
         match self {
             MarketType::Spot => "spot",
