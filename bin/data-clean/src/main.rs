@@ -1,7 +1,12 @@
 use anyhow::Context;
+use tracing_subscriber::EnvFilter;
 
 fn main() -> anyhow::Result<()> {
-    let _ = env_logger::try_init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
 
     let config_path = std::env::args()
         .nth(1)

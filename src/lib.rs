@@ -5,6 +5,7 @@ pub mod error;
 pub mod task;
 
 use config::Config;
+use config::get_proxy;
 pub use error::AppError;
 
 const SYMBOL_BATCH_SIZE: usize = 20;
@@ -14,16 +15,11 @@ const DATE_CHUNK_DAYS: i64 = 30;
 /// 1. Clean up stale .tmp files
 /// 2. Resolve symbols and their start dates
 /// 3. Download and convert data in bounded batches
-pub async fn downloader(config: &Config) -> Result<(), AppError> {
+pub async fn run(config: &Config) -> Result<(), AppError> {
     let client = build_client(config)?;
     clean::cleanup_tmp(&config.data_dir).await;
 
-    let symbols = task::symbols::resolve_symbols(
-        &config.symbols,
-        &config.market_type,
-        &config.data_dir,
-    )
-    .await?;
+    let symbols = config.resolve_symbols().await?;
 
     let timeframes: &[String] = config.timeframes.as_deref().unwrap_or(&[]);
     if timeframes.is_empty() {
@@ -31,13 +27,8 @@ pub async fn downloader(config: &Config) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let start_dates = task::start_date::resolve_start_dates(
-        &symbols,
-        &client,
-        &config.market_type,
-        &config.data_dir,
-    )
-    .await?;
+    let start_dates =
+        config::start_date::resolve_start_dates(&symbols, &client, &config.market_type).await?;
 
     let overall_end = config
         .end_date
@@ -61,10 +52,8 @@ pub async fn downloader(config: &Config) -> Result<(), AppError> {
         .await?;
     }
 
-    if !timeframes.is_empty() {
-        let total = (symbols.len() * config.market_type.len() * timeframes.len()) as f64;
-        tracing::info!("all done — checked up to {total:.0} symbol-type-tf combinations");
-    }
+    let total = (symbols.len() * config.market_type.len() * timeframes.len()) as f64;
+    tracing::info!("all done — checked up to {total:.0} symbol-type-tf combinations");
 
     clean::cleanup_tmp(&config.data_dir).await;
     Ok(())
@@ -76,7 +65,7 @@ async fn process_symbol_batch(
     symbols: &[String],
     timeframes: &[String],
     config: &Config,
-    start_dates: &task::start_date::StartDateMap,
+    start_dates: &config::start_date::StartDateMap,
     overall_end: chrono::NaiveDate,
     local: &std::collections::HashSet<String>,
     client: &reqwest::Client,
@@ -85,7 +74,8 @@ async fn process_symbol_batch(
 
     let mut chunk_start = overall_start;
     while chunk_start <= overall_end {
-        let chunk_end = (chunk_start + chrono::Duration::days(DATE_CHUNK_DAYS - 1)).min(overall_end);
+        let chunk_end =
+            (chunk_start + chrono::Duration::days(DATE_CHUNK_DAYS - 1)).min(overall_end);
 
         let tasks = task::build_tasks(
             symbols,
@@ -95,7 +85,6 @@ async fn process_symbol_batch(
             chunk_start,
             chunk_end,
             local,
-            &config.data_dir,
         );
 
         if !tasks.is_empty() {
@@ -118,7 +107,7 @@ async fn process_symbol_batch(
 /// then falls back to 1 year ago.
 fn determine_overall_start(
     config: &Config,
-    start_dates: &task::start_date::StartDateMap,
+    start_dates: &config::start_date::StartDateMap,
 ) -> chrono::NaiveDate {
     if let Some(ref sd) = config.start_date
         && let Ok(d) = chrono::NaiveDate::parse_from_str(sd, "%Y-%m-%d")
@@ -138,7 +127,7 @@ fn build_client(config: &Config) -> Result<reqwest::Client, AppError> {
         .timeout(std::time::Duration::from_secs(30))
         .pool_max_idle_per_host(config.max_concurrent)
         .pool_idle_timeout(std::time::Duration::from_secs(30));
-    if let Some(ref p) = config.proxy_url
+    if let Some(ref p) = get_proxy::proxy_url()
         && let Ok(proxy) = reqwest::Proxy::all(p)
     {
         b = b.proxy(proxy);

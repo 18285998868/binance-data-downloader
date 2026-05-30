@@ -9,7 +9,7 @@ pub fn list_parquet_files(data_dir: &Path) -> Result<Vec<std::path::PathBuf>, Er
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                log::warn!("walkdir error (skipping): {e}");
+                tracing::warn!("walkdir error (skipping): {e}");
                 continue;
             }
         };

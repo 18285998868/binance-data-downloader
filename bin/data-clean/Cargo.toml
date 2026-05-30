@@ -10,7 +10,7 @@ polars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 thiserror = { workspace = true }
-log = { workspace = true }
-env_logger = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 walkdir = { workspace = true }
 anyhow = { workspace = true }

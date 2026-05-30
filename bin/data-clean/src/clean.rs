@@ -28,7 +28,7 @@ pub fn clean_dataframe(df: DataFrame) -> Result<DataFrame, Error> {
 
     let after_dedup = after_clean.height();
     if after_dedup < before {
-        log::warn!("removed {} duplicate rows", before - after_dedup);
+        tracing::warn!("removed {} duplicate rows", before - after_dedup);
     }
 
     let df = after_clean
@@ -41,10 +41,10 @@ pub fn clean_dataframe(df: DataFrame) -> Result<DataFrame, Error> {
 
     let after = df.height();
     if after < after_dedup {
-        log::warn!("removed {} rows with remaining nulls", after_dedup - after);
+        tracing::warn!("removed {} rows with remaining nulls", after_dedup - after);
     }
 
-    log::debug!(
+    tracing::debug!(
         "cleaned: {} / {} rows passed all checks",
         df.height(),
         before

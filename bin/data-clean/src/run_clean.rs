@@ -4,10 +4,10 @@ use super::{clean, config::Config, listing, load, save};
 pub fn run(config: &Config) -> Result<(), super::Error> {
     let files = listing::list_parquet_files(&config.data_dir)?;
     if files.is_empty() {
-        log::warn!("no .parquet files found in {}", config.data_dir.display());
+        tracing::warn!("no .parquet files found in {}", config.data_dir.display());
         return Ok(());
     }
-    log::info!(
+    tracing::info!(
         "found {} .parquet files in {}",
         files.len(),
         config.data_dir.display()
@@ -15,7 +15,7 @@ pub fn run(config: &Config) -> Result<(), super::Error> {
     for path in &files {
         let df = load::read_parquet(path)?;
         if df.height() == 0 {
-            log::warn!("skip empty: {}", path.display());
+            tracing::warn!("skip empty: {}", path.display());
             continue;
         }
         let df = clean::clean_dataframe(df)?;

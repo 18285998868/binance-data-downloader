@@ -20,11 +20,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+dotenvy = { workspace = true }
 
-sled = "0.34.7"
 backoff = { version = "0.4", features = ["tokio"] }
 common = { path = "../common" }
 data-clean = { path = "bin/data-clean" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+temp-env = { workspace = true }

@@ -24,4 +24,19 @@ impl MarketType {
             MarketType::Futures => "futures",
         }
     }
+
+    pub fn exchange_info_url(self) -> &'static str {
+        match self {
+            MarketType::Spot => "https://api.binance.com/api/v3/exchangeInfo",
+            MarketType::Futures => "https://fapi.binance.com/fapi/v1/exchangeInfo",
+        }
+    }
+
+    pub fn klines_url(self, pair: &str) -> String {
+        let base = match self {
+            MarketType::Spot => "https://api.binance.com/api/v3/klines",
+            MarketType::Futures => "https://fapi.binance.com/fapi/v1/klines",
+        };
+        format!("{base}?symbol={pair}&interval=1m&limit=1&startTime=0")
+    }
 }

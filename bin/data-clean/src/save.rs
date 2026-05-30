@@ -14,6 +14,6 @@ pub fn overwrite_parquet(path: &Path, mut df: DataFrame) -> Result<(), Error> {
             .map_err(|e| Error::Data(format!("write {}: {e}", path.display())))?;
     }
     std::fs::rename(&tmp, path)?;
-    log::info!("overwrote {} ({} rows)", path.display(), df.height());
+    tracing::info!("overwrote {} ({} rows)", path.display(), df.height());
     Ok(())
 }

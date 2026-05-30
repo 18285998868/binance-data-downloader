@@ -3,8 +3,9 @@ use std::path::Path;
 
 /// Scans `data_dir` recursively for existing `.zip` and `.parquet` files.
 ///
-/// Returns a set of normalized paths (with extensions stripped) so the
-/// downloader can skip files already on disk.
+/// Returns a set of paths normalized to `.zip` suffix so the
+/// downloader can skip files already on disk with a direct
+/// `contains` check against the URL's `rel_path`.
 pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, crate::AppError> {
     let dir = data_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -18,18 +19,22 @@ pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, crate:
             }
             let rel = e.path().strip_prefix(&dir).unwrap_or(e.path());
             let s = rel.to_string_lossy().to_string();
-            if !s.ends_with(".zip") && !s.ends_with(".parquet") {
-                continue;
+            if s.ends_with(".zip") || s.ends_with(".parquet") {
+                files.insert(normalize_to_zip(&s));
             }
-            let stripped = s
-                .strip_suffix(".parquet")
-                .or_else(|| s.strip_suffix(".zip"))
-                .unwrap_or(&s)
-                .to_string();
-            files.insert(stripped);
         }
         Ok::<_, crate::AppError>(files)
     })
     .await
     .map_err(|e| crate::AppError::Join(format!("spawn: {e}")))?
+}
+
+/// Strips `.parquet` (if present) → ensures `.zip` suffix, so the result
+/// matches `DownloadUrl.rel_path` for a direct set lookup.
+fn normalize_to_zip(p: &str) -> String {
+    if let Some(base) = p.strip_suffix(".parquet") {
+        format!("{base}.zip")
+    } else {
+        p.to_string()
+    }
 }

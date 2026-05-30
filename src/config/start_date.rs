@@ -3,13 +3,9 @@ use backoff::ExponentialBackoff;
 use backoff::future::retry;
 use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
-use std::path::Path;
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
 
-use super::store;
-use crate::config::market_type::MarketType;
-
-const CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+use super::market_type::MarketType;
 
 /// Maps `market_type:symbol` keys to their earliest available date.
 pub type StartDateMap = HashMap<String, chrono::NaiveDate>;
@@ -21,16 +17,15 @@ pub fn start_date_key(mt: MarketType, pair: &str) -> String {
 
 /// Resolves the earliest available date for each symbol on each market type.
 ///
-/// Reads from sled cache first; fetches from Binance klines API
+/// Checks in-memory cache first; fetches from Binance klines API
 /// (with backoff) for any missing entries, then caches the result.
 pub async fn resolve_start_dates(
     symbols: &[String],
     client: &reqwest::Client,
     market_types: &[MarketType],
-    data_dir: &Path,
 ) -> Result<StartDateMap, crate::AppError> {
-    let cache_dir = data_dir.join(".cache");
-    let store = store::Store::open_async(&cache_dir).await?;
+    static CACHE: LazyLock<Mutex<HashMap<String, String>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
     let mut map = HashMap::new();
     let mut misses: Vec<(String, MarketType)> = Vec::new();
@@ -38,13 +33,18 @@ pub async fn resolve_start_dates(
     for pair in symbols {
         for &mt in market_types {
             let key = start_date_key(mt, pair);
-            if let Ok(Some(d)) = store::get_cached::<String>(&store, &key).await
+            let cached = CACHE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .cloned();
+            if let Some(d) = cached
                 && let Ok(date) = chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d")
             {
                 map.insert(key, date);
-                continue;
+            } else {
+                misses.push((pair.clone(), mt));
             }
-            misses.push((pair.clone(), mt));
         }
     }
 
@@ -60,15 +60,10 @@ pub async fn resolve_start_dates(
             .into_iter()
             .collect::<Result<_, _>>()?;
 
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         for (pair, mt, date) in &fetched {
             let key = start_date_key(*mt, pair);
-            let _ = store::set_cached(
-                &store,
-                &key,
-                date.format("%Y-%m-%d").to_string(),
-                CACHE_TTL,
-            )
-            .await;
+            cache.insert(key.clone(), date.format("%Y-%m-%d").to_string());
             map.insert(key, *date);
         }
     }
@@ -83,14 +78,7 @@ async fn fetch_first_date(
     mt: MarketType,
     pair: &str,
 ) -> Result<chrono::NaiveDate, crate::AppError> {
-    let url = match mt {
-        MarketType::Spot => format!(
-            "https://api.binance.com/api/v3/klines?symbol={pair}&interval=1m&limit=1&startTime=0"
-        ),
-        MarketType::Futures => format!(
-            "https://fapi.binance.com/fapi/v1/klines?symbol={pair}&interval=1m&limit=1&startTime=0"
-        ),
-    };
+    let url = mt.klines_url(pair);
 
     let op = || {
         let c = client.clone();
@@ -116,7 +104,9 @@ async fn fetch_first_date(
             };
             let k: Vec<Vec<serde_json::Value>> = match serde_json::from_str(&t) {
                 Ok(k) => k,
-                Err(e) => return Err(BackoffError::Permanent(crate::AppError::Api(e.to_string()))),
+                Err(e) => {
+                    return Err(BackoffError::Permanent(crate::AppError::Api(e.to_string())));
+                }
             };
             let first = match k.first() {
                 Some(f) => f,

@@ -3,7 +3,5 @@
 # data_dir = "./data"                    # 数据存储目录
 # symbols = ["BTCUSDT", "ETHUSDT"]     # 留空则自动获取所有 TRADING 交易对
 # timeframes = ["1m", "5m", "15m"]     # 默认 12 个周期
-proxy_url = "socks5h://127.0.0.1:7890"
 # start_date = "2020-01-01"            # 默认从交易所获取
 # end_date = "2025-01-01"              # 默认昨天
-# log_level = "info"                   # 默认 "debug"

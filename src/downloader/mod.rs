@@ -6,6 +6,7 @@ pub mod http;
 
 use crate::task::DownloadTask;
 use futures::stream::{self, StreamExt};
+use tracing::Instrument;
 
 /// Downloads and processes a batch of tasks with bounded concurrency.
 pub async fn run_downloads(
@@ -24,7 +25,8 @@ pub async fn run_downloads(
     );
     let results: Vec<_> = stream::iter(tasks.into_iter().map(|t| {
         let c = client.clone();
-        async move { pipeline_inner(&c, &t).await }
+        let span = tracing::info_span!("download", pair = %t.pair, tf = %t.timeframe);
+        async move { pipeline_inner(&c, &t).await }.instrument(span)
     }))
     .buffer_unordered(max_concurrent)
     .collect()
