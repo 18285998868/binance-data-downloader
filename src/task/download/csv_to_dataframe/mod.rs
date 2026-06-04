@@ -5,10 +5,6 @@ pub use set_column_types::convert_types;
 
 use polars::prelude::*;
 
-/// Parses CSV bytes into a Polars DataFrame.
-///
-/// Auto-detects whether the CSV has a header row. If not, generates
-/// default Binance kline column names (open_time, open, high, ...).
 pub fn csv_to_dataframe_sync(bytes: &[u8]) -> Result<DataFrame, crate::AppError> {
     let has_header = table_title::detect_header(bytes);
     let opts = CsvReadOptions::default().with_infer_schema_length(Some(0));

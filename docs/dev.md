@@ -1,33 +1,46 @@
-```
-config/
-  config.toml
-  run_once.toml
-docs/
-src/
-  main.rs 入口,调用lib.rs
-  lib.rs 调用run_batch/run_batch.rs
-  error.rs
-  run_batch/
-    run_batch.rs
-    mod.rs
-    config.rs 
-    load.rs # 调用creats/common/src/config/load_toml.rs 加载
-  run_once/
-    run_once.rs # 编排执行逻辑
-    mod.rs
-    config.rs
-tests/
+TODO:
+
+```bash
+creats/binance-data-downloader/
+    config/
+        config.toml 
+                        # TOML文件格式:
+                        # 每个字段行后跟着注释
+                        # 注释格式: # 必须, 默认值:   ,可选参数:
+        
+    docs/
+    src/
+        main.rs # 入口,调用lib.rs
+        lib.rs #  调用run_batch/run_batch.rs
+        error.rs # thiserror
+        config/
+            mod.rs 
+            config.rs # 使用 impl Default
+            load.rs # 调用creats/common/src/config/load_toml.rs 加载 env!("CARGO_MANIFEST_DIR")/config/config.toml
+            get_symbols.rs # moka缓存
+            get_start.rs # # moka缓存
+            retry.rs # backoff
+        task/
+            mod.rs
+            urls.rs
+            get_local_files.rs
+            dl_urls.rs
+            download/
+                mod.rs
+                downloader.rs # 单个文件下载流程编排
+                http.rs
+                ...
+        tests/ #集成测试 
 
 ```
 run_once/
 ```toml
-symbol = "BTCUSDT" # 必须
-timeframe = "1d"   # 必须
+symbol = ["BTCUSDT"] # 必须
+timeframe = ["1d"]   # 必须
 # start = "2020-01-01" # 可选,默认从交易所获取
 # end = "2025-01-01"#可选, 默认昨天
 # dir = "data" # 数据存储目录,可选,默认cwd/data
 # max_concurrent = 1000 # 最大并发数,默认1000
-# 
 ```
 symbol,timeframe,start,end
 

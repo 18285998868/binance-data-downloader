@@ -1,6 +1,5 @@
 use std::io::Read;
 
-/// Extracts the first CSV entry from a ZIP archive in memory.
 pub fn extract_csv_from_bytes(zip_bytes: &[u8]) -> Result<Vec<u8>, crate::AppError> {
     let cursor = std::io::Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor)

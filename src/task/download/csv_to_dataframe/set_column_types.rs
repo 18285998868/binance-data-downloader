@@ -1,6 +1,5 @@
 use polars::prelude::*;
 
-/// Converts column types: `open_time`/`close_time`/`count` -> Int64, rest -> Float64.
 pub fn convert_types(df: &DataFrame) -> Result<DataFrame, crate::AppError> {
     let mut series = Vec::with_capacity(df.width());
     for name in df.get_column_names() {
@@ -38,10 +37,7 @@ mod tests {
             converted.column("open_time").unwrap().dtype(),
             &DataType::Int64
         );
-        assert_eq!(
-            converted.column("open").unwrap().dtype(),
-            &DataType::Float64
-        );
+        assert_eq!(converted.column("open").unwrap().dtype(), &DataType::Float64);
         assert_eq!(
             converted.column("close_time").unwrap().dtype(),
             &DataType::Int64
@@ -59,10 +55,7 @@ mod tests {
         )
         .unwrap();
         let converted = super::convert_types(&df).unwrap();
-        assert_eq!(
-            converted.column("high").unwrap().dtype(),
-            &DataType::Float64
-        );
+        assert_eq!(converted.column("high").unwrap().dtype(), &DataType::Float64);
         assert_eq!(converted.column("low").unwrap().dtype(), &DataType::Float64);
         assert_eq!(
             converted.column("volume").unwrap().dtype(),

@@ -1,11 +1,6 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Scans `data_dir` recursively for existing `.zip` and `.parquet` files.
-///
-/// Returns a set of paths normalized to `.zip` suffix so the
-/// downloader can skip files already on disk with a direct
-/// `contains` check against the URL's `rel_path`.
 pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, crate::AppError> {
     let dir = data_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -29,8 +24,6 @@ pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, crate:
     .map_err(|e| crate::AppError::Join(format!("spawn: {e}")))?
 }
 
-/// Strips `.parquet` (if present) → ensures `.zip` suffix, so the result
-/// matches `DownloadUrl.rel_path` for a direct set lookup.
 fn normalize_to_zip(p: &str) -> String {
     if let Some(base) = p.strip_suffix(".parquet") {
         format!("{base}.zip")

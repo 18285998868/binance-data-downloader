@@ -1,13 +1,8 @@
-use backoff::Error as BackoffError;
-use backoff::ExponentialBackoff;
 use backoff::future::retry;
 
-use crate::run_once::task::DownloadTask;
+use crate::config::retry::{default_backoff, BackoffError};
+use crate::task::DownloadTask;
 
-/// Downloads a ZIP file with exponential backoff retry.
-///
-/// Returns `NotFound` on HTTP 404 (permanent, no retry).
-/// All other failures are retried with exponential backoff.
 pub async fn download_bytes_with_retry(
     client: &reqwest::Client,
     task: &DownloadTask,
@@ -28,9 +23,7 @@ pub async fn download_bytes_with_retry(
             let status = resp.status();
             if !status.is_success() {
                 return if status == reqwest::StatusCode::NOT_FOUND {
-                    Err(BackoffError::Permanent(crate::AppError::NotFound {
-                        url: u,
-                    }))
+                    Err(BackoffError::Permanent(crate::AppError::NotFound { url: u }))
                 } else {
                     Err(BackoffError::Transient {
                         err: crate::AppError::DownloadFailed {
@@ -63,12 +56,5 @@ pub async fn download_bytes_with_retry(
         }
     };
 
-    retry(
-        ExponentialBackoff {
-            max_elapsed_time: Some(std::time::Duration::from_secs(30)),
-            ..Default::default()
-        },
-        op,
-    )
-    .await
+    retry(default_backoff(), op).await
 }

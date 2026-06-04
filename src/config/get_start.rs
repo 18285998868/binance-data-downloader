@@ -1,8 +1,9 @@
-use backoff::Error as BackoffError;
-use backoff::ExponentialBackoff;
 use backoff::future::retry;
 use moka::future::Cache;
 use std::sync::LazyLock;
+
+use super::retry::{default_backoff, BackoffError};
+use crate::AppError;
 
 static START_DATE_CACHE: LazyLock<Cache<String, String>> =
     LazyLock::new(|| Cache::builder().max_capacity(50_000).build());
@@ -13,16 +14,15 @@ fn klines_url(symbol: &str, timeframe: &str) -> String {
     )
 }
 
-/// Fetches (from cache or API) the date of the first kline for a symbol/timeframe.
 pub async fn get_first_kline_date(
     client: &reqwest::Client,
     symbol: &str,
     timeframe: &str,
-) -> Result<chrono::NaiveDate, crate::AppError> {
+) -> Result<chrono::NaiveDate, AppError> {
     let key = format!("{symbol}:{timeframe}");
     if let Some(cached) = START_DATE_CACHE.get(&key).await {
         let d = chrono::NaiveDate::parse_from_str(&cached, "%Y-%m-%d")
-            .map_err(|e| crate::AppError::Date(e.to_string()))?;
+            .map_err(|e| AppError::Date(e.to_string()))?;
         return Ok(d);
     }
     let date = fetch_first_kline(client, symbol, timeframe).await?;
@@ -36,7 +36,7 @@ async fn fetch_first_kline(
     client: &reqwest::Client,
     symbol: &str,
     timeframe: &str,
-) -> Result<chrono::NaiveDate, crate::AppError> {
+) -> Result<chrono::NaiveDate, AppError> {
     let url = klines_url(symbol, timeframe);
 
     let op = || {
@@ -47,7 +47,7 @@ async fn fetch_first_kline(
                 Ok(r) => r,
                 Err(e) => {
                     return Err(BackoffError::Transient {
-                        err: crate::AppError::from(e),
+                        err: AppError::from(e),
                         retry_after: None,
                     });
                 }
@@ -56,43 +56,37 @@ async fn fetch_first_kline(
                 Ok(t) => t,
                 Err(e) => {
                     return Err(BackoffError::Transient {
-                        err: crate::AppError::from(e),
+                        err: AppError::from(e),
                         retry_after: None,
                     });
                 }
             };
             let k: Vec<Vec<serde_json::Value>> = match serde_json::from_str(&t) {
                 Ok(k) => k,
-                Err(e) => return Err(BackoffError::Permanent(crate::AppError::Api(e.to_string()))),
+                Err(e) => return Err(BackoffError::Permanent(AppError::Api(e.to_string()))),
             };
             let first = match k.first() {
                 Some(f) => f,
                 None => {
-                    return Err(BackoffError::Permanent(crate::AppError::Api(
-                        "no klines".into(),
-                    )));
+                    return Err(BackoffError::Permanent(AppError::Api("no klines".into())));
                 }
             };
             let first_elem = match first.first() {
                 Some(v) => v,
                 None => {
-                    return Err(BackoffError::Permanent(crate::AppError::Api(
-                        "empty kline".into(),
-                    )));
+                    return Err(BackoffError::Permanent(AppError::Api("empty kline".into())));
                 }
             };
             let ms = match first_elem.as_u64() {
                 Some(ms) => ms,
                 None => {
-                    return Err(BackoffError::Permanent(crate::AppError::Api(
-                        "open_time missing".into(),
-                    )));
+                    return Err(BackoffError::Permanent(AppError::Api("open_time missing".into())));
                 }
             };
             let dt = match chrono::DateTime::from_timestamp_millis(ms as i64) {
                 Some(dt) => dt,
                 None => {
-                    return Err(BackoffError::Permanent(crate::AppError::Date(format!(
+                    return Err(BackoffError::Permanent(AppError::Date(format!(
                         "invalid timestamp: {ms}"
                     ))));
                 }
@@ -101,14 +95,7 @@ async fn fetch_first_kline(
         }
     };
 
-    retry(
-        ExponentialBackoff {
-            max_elapsed_time: Some(std::time::Duration::from_secs(30)),
-            ..Default::default()
-        },
-        op,
-    )
-    .await
+    retry(default_backoff(), op).await
 }
 
 #[cfg(test)]
