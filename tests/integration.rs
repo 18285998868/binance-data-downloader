@@ -7,20 +7,21 @@ async fn pipeline_local_scan_to_urls_to_parquet() {
     let parquet_path = data_dir.join(&format!("{existing_rel}.parquet"));
     std::fs::create_dir_all(parquet_path.parent().unwrap()).unwrap();
     {
-        let empty = data_downloader::run_once::downloader::csv_to_dataframe::csv_to_dataframe_sync(
-            b"open_time,open,high,low,close
+        let empty =
+            binance_data_downloader::run_once::downloader::csv_to_dataframe::csv_to_dataframe_sync(
+                b"open_time,open,high,low,close
 1,100,101,99,100
 ",
-        )
-        .unwrap();
-        data_downloader::run_once::downloader::dataframe_to_parquet::write_parquet_sync(
+            )
+            .unwrap();
+        binance_data_downloader::run_once::downloader::dataframe_to_parquet::write_parquet_sync(
             &parquet_path,
             empty,
         )
         .unwrap();
     }
 
-    let local = data_downloader::run_once::task::local_file::scan_local_files(&data_dir)
+    let local = binance_data_downloader::run_once::task::local_file::scan_local_files(&data_dir)
         .await
         .unwrap();
 
@@ -29,14 +30,14 @@ async fn pipeline_local_scan_to_urls_to_parquet() {
         "local should contain .zip-normalized path, got: {local:?}",
     );
 
-    use data_downloader::run_once::task::urls;
+    use binance_data_downloader::run_once::task::urls;
     let chunk_start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let chunk_end = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
 
     let tasks: Vec<_> = urls::build_urls("BTCUSDT", "1m", chunk_start, chunk_end)
         .into_iter()
         .filter(|dl| !local.contains(&dl.rel_path))
-        .map(|dl| data_downloader::run_once::task::DownloadTask {
+        .map(|dl| binance_data_downloader::run_once::task::DownloadTask {
             url: dl.url.clone(),
             dest: data_dir.join(&dl.rel_path),
             pair: dl.pair,
