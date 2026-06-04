@@ -1,101 +1,80 @@
-# 介绍
+# binance-data-downloader
 
 从 Binance Public Data 下载历史 K 线数据，解压 CSV 并转换为 Parquet 格式。
 
-# 配置
+## 文件结构
+
+```
+config/
+  config.toml          # 批量下载配置
+  run_once.toml        # 单 (symbol, timeframe) 配置
+src/
+  main.rs              # 入口
+  lib.rs               # 顶层 run() -> run_batch::run()
+  error.rs             # AppError 定义
+  run_batch/
+    mod.rs
+    config.rs          # BatchConfig
+    load.rs            # 加载 config.toml (调用 common::config::load_toml)
+    run_batch.rs       # 展开 symbol×timeframe, 依次调用 run_once
+  run_once/
+    mod.rs
+    config.rs          # RunOnceConfig
+    get_start.rs       # 获取合约首根K线日期 (moka 缓存)
+    run_once.rs        # 单对下载编排: 构建URL→扫描本地→过滤→分块下载→处理→写入Parquet
+  task/
+    mod.rs             # DownloadTask 定义
+    urls.rs            # 构建下载 URL
+    local_file.rs      # 扫描本地已下载文件
+  downloader/          # 下载→解压→CSV→类型转换→清洗→Parquet 流水线
+  clean.rs             # .tmp 文件清理
+tests/
+  integration.rs       # 集成测试
+```
+
+## 批量下载 (run_batch)
 
 ```toml
-proxy_url = "socks5h://127.0.0.1:7890"
-# market_type = ["futures"]
-# max_concurrent = 1000
-# data_dir = "./data"
-# symbols = ["BTCUSDT", "ETHUSDT"]
-# timeframes = ["1m", "5m", "15m"]
-# start_date = "2020-01-01"
-# end_date = "2025-01-01"
-# log_level = "info"
+# config/config.toml
+symbol = ["BTCUSDT", "ETHUSDT"]   # 必须
+timeframe = ["1m", "5m", "1h"]    # 必须
+# max_concurrent = 1000           # 文件级并发, 默认 1000
+# start = "2020-01-01"            # 可选, 默认从交易所获取
+# end   = "2025-01-01"            # 可选, 默认昨天
+# dir   = "data"                  # 可选, 默认 ./data
 ```
 
-# 执行流程
+## 单对下载 (run_once)
 
-```mermaid
-flowchart LR
-  A[读取 download.toml] --> B[解析 Config]
-  B --> C[构建 reqwest Client]
-  C --> D{有 proxy_url?}
-  D -->|是| E[添加代理]
-  D -->|否| F[返回 Client]
+```toml
+# config/run_once.toml
+symbol = "BTCUSDT"         # 必须
+timeframe = "1d"           # 必须
+# start = "2020-01-01"     # 可选, 默认从交易所获取
+# end   = "2025-01-01"     # 可选, 默认昨天
+# dir   = "data"           # 可选, 默认 ./data
 ```
 
-```mermaid
-flowchart LR
-  A[开始] --> B{配置指定了 symbols?}
-  B -->|是| C[直接使用]
-  B -->|否| D[调用 exchangeInfo API]
-  D --> E[过滤 TRADING 状态]
-  E --> F[sled 缓存 7d]
-  F --> G[对每个 symbol<br>查询首根 K 线时间]
-  G --> H[缓存 start_date]
-  H --> I[返回 symbols + start_dates]
-```
-
-```mermaid
-flowchart LR
-  A[分批 symbols / 每批 20] --> B[按 30 天分块]
-  B --> C[遍历 symbol×type×tf×date]
-  C --> D[生成 URL]
-  D --> E{本地已下载?}
-  E -->|是| F[跳过]
-  E -->|否| G[构建 DownloadTask<br>url + dest + pair + tf]
-  G --> H[返回任务列表]
-```
-
-```mermaid
-flowchart LR
-  A[DownloadTask 列表] --> B[futures buffer_unordered<br>max_concurrent]
-  B --> C[HTTP GET]
-  C --> D{状态码?}
-  D -->|200| E[返回字节]
-  D -->|404| F[Permanent 结束]
-  D -->|其他/网络错误| G[ExponentialBackoff 重试]
-  G --> C
-```
-
-```mermaid
-flowchart LR
-  A[ZIP 字节] --> B[打开 ZipArchive]
-  B --> C[遍历 entries]
-  C --> D{是目录?}
-  D -->|是| E[跳过]
-  D -->|否| F{扩展名 .csv?}
-  F -->|否| G[继续]
-  F -->|是| H[读取 CSV 字节]
-  H --> I[返回 CSV]
-```
-
-```mermaid
-flowchart LR
-  A[CSV 字节] --> B{有列名行?}
-  B -->|是| C[直接解析]
-  B -->|否| D[添加默认列名]
-  C --> E[Polars DataFrame]
-  D --> E
-  E --> F[列类型转换<br>Int64 / Float64]
-  F --> G[数据清洗<br>common::data_clean]
-  G --> H[返回 DataFrame]
-```
-
-```mermaid
-flowchart LR
-  A[DataFrame] --> B[创建父目录]
-  B --> C[写入 .parquet.tmp]
-  C --> D[ParquetWriter 序列化]
-  D --> E[rename 原子替换]
-  E --> F[清理残留 .tmp]
-```
-
-# 用法
+## 用法
 
 ```bash
 cargo run -p data-downloader
+```
+
+## 执行流程
+
+```
+run()
+  └─ run_batch::run()
+       ├─ 加载 config.toml
+       ├─ 构建 HTTP client
+       ├─ 遍历 (symbol × timeframe)
+       │    顺序执行, 每个 pair 内部文件级并发
+       │    └─ run_once::run_once()
+       │         ├─ get_start::get_first_kline_date() (moka 缓存)
+       │         ├─ scan_local_files()
+       │         ├─ 按 30 天分块
+       │         └─ 下载→解压→CSV→类型转换→清洗→写入 Parquet
+       │               文件级并发 buffer_unordered(max_concurrent)
+       └─ 完成
 ```

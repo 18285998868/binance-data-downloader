@@ -2,7 +2,7 @@ use backoff::Error as BackoffError;
 use backoff::ExponentialBackoff;
 use backoff::future::retry;
 
-use crate::task::DownloadTask;
+use crate::run_once::task::DownloadTask;
 
 /// Downloads a ZIP file with exponential backoff retry.
 ///
@@ -63,5 +63,12 @@ pub async fn download_bytes_with_retry(
         }
     };
 
-    retry(ExponentialBackoff::default(), op).await
+    retry(
+        ExponentialBackoff {
+            max_elapsed_time: Some(std::time::Duration::from_secs(30)),
+            ..Default::default()
+        },
+        op,
+    )
+    .await
 }

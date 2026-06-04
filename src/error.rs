@@ -2,9 +2,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("Data clean error: {0}")]
-    DataClean(#[from] data_clean::Error),
-
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
@@ -13,6 +10,9 @@ pub enum AppError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("Config error: {0}")]
+    Config(String),
 
     #[error("API error: {0}")]
     Api(String),

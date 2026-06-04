@@ -1,7 +1,6 @@
-# market_type = ["futures"]              # ["spot", "futures"]
-# max_concurrent = 1000                   # 最大并发数
-# data_dir = "./data"                    # 数据存储目录
-# symbols = ["BTCUSDT", "ETHUSDT"]     # 留空则自动获取所有 TRADING 交易对
-# timeframes = ["1m", "5m", "15m"]     # 默认 12 个周期
-# start_date = "2020-01-01"            # 默认从交易所获取
-# end_date = "2025-01-01"              # 默认昨天
+# symbol      = ["BTCUSDT"]     # 可选参数
+# timeframe   = ["1m", "5m"]     # 可选参数
+# max_concurrent = 1000          # 可选参数, 默认值: 1000
+# start       = "2020-01-01"    # 可选参数
+# end         = "2025-01-01"    # 可选参数
+# dir         = "data"          # 可选参数, 默认值: ./data

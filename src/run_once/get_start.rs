@@ -1,0 +1,152 @@
+use backoff::Error as BackoffError;
+use backoff::ExponentialBackoff;
+use backoff::future::retry;
+use moka::future::Cache;
+use std::sync::LazyLock;
+
+static START_DATE_CACHE: LazyLock<Cache<String, String>> =
+    LazyLock::new(|| Cache::builder().max_capacity(50_000).build());
+
+fn klines_url(symbol: &str, timeframe: &str) -> String {
+    format!(
+        "https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={timeframe}&limit=1&startTime=0"
+    )
+}
+
+/// Fetches (from cache or API) the date of the first kline for a symbol/timeframe.
+pub async fn get_first_kline_date(
+    client: &reqwest::Client,
+    symbol: &str,
+    timeframe: &str,
+) -> Result<chrono::NaiveDate, crate::AppError> {
+    let key = format!("{symbol}:{timeframe}");
+    if let Some(cached) = START_DATE_CACHE.get(&key).await {
+        let d = chrono::NaiveDate::parse_from_str(&cached, "%Y-%m-%d")
+            .map_err(|e| crate::AppError::Date(e.to_string()))?;
+        return Ok(d);
+    }
+    let date = fetch_first_kline(client, symbol, timeframe).await?;
+    START_DATE_CACHE
+        .insert(key, date.format("%Y-%m-%d").to_string())
+        .await;
+    Ok(date)
+}
+
+async fn fetch_first_kline(
+    client: &reqwest::Client,
+    symbol: &str,
+    timeframe: &str,
+) -> Result<chrono::NaiveDate, crate::AppError> {
+    let url = klines_url(symbol, timeframe);
+
+    let op = || {
+        let c = client.clone();
+        let u = url.clone();
+        async move {
+            let r = match c.get(&u).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(BackoffError::Transient {
+                        err: crate::AppError::from(e),
+                        retry_after: None,
+                    });
+                }
+            };
+            let t = match r.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    return Err(BackoffError::Transient {
+                        err: crate::AppError::from(e),
+                        retry_after: None,
+                    });
+                }
+            };
+            let k: Vec<Vec<serde_json::Value>> = match serde_json::from_str(&t) {
+                Ok(k) => k,
+                Err(e) => return Err(BackoffError::Permanent(crate::AppError::Api(e.to_string()))),
+            };
+            let first = match k.first() {
+                Some(f) => f,
+                None => {
+                    return Err(BackoffError::Permanent(crate::AppError::Api(
+                        "no klines".into(),
+                    )));
+                }
+            };
+            let first_elem = match first.first() {
+                Some(v) => v,
+                None => {
+                    return Err(BackoffError::Permanent(crate::AppError::Api(
+                        "empty kline".into(),
+                    )));
+                }
+            };
+            let ms = match first_elem.as_u64() {
+                Some(ms) => ms,
+                None => {
+                    return Err(BackoffError::Permanent(crate::AppError::Api(
+                        "open_time missing".into(),
+                    )));
+                }
+            };
+            let dt = match chrono::DateTime::from_timestamp_millis(ms as i64) {
+                Some(dt) => dt,
+                None => {
+                    return Err(BackoffError::Permanent(crate::AppError::Date(format!(
+                        "invalid timestamp: {ms}"
+                    ))));
+                }
+            };
+            Ok(dt.date_naive())
+        }
+    };
+
+    retry(
+        ExponentialBackoff {
+            max_elapsed_time: Some(std::time::Duration::from_secs(30)),
+            ..Default::default()
+        },
+        op,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn klines_url_format() {
+        let url = klines_url("BTCUSDT", "1m");
+        assert!(url.contains("BTCUSDT"));
+        assert!(url.contains("interval=1m"));
+        assert!(url.contains("startTime=0"));
+        assert!(url.contains("limit=1"));
+    }
+
+    #[test]
+    fn klines_url_different_symbol_timeframe() {
+        let url = klines_url("ETHUSDT", "5m");
+        assert!(url.contains("ETHUSDT"));
+        assert!(url.contains("interval=5m"));
+    }
+
+    #[test]
+    fn klines_url_start_time_zero() {
+        let url = klines_url("BTCUSDT", "1d");
+        assert!(url.contains("startTime=0"));
+    }
+
+    #[test]
+    fn date_parse_round_trip() {
+        let date_str = "2024-01-15";
+        let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap();
+        assert_eq!(date.format("%Y-%m-%d").to_string(), date_str);
+    }
+
+    #[test]
+    fn date_parse_leap_year() {
+        let date = chrono::NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        assert_eq!(date.format("%Y-%m-%d").to_string(), "2024-02-29");
+    }
+}

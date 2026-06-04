@@ -1,14 +1,14 @@
 pub mod csv_to_dataframe;
-pub mod data_clean;
 pub mod dataframe_to_parquet;
 pub mod extract_zip_from_bytes;
 pub mod http;
 
-use crate::task::DownloadTask;
+use crate::run_once::task::DownloadTask;
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 /// Downloads and processes a batch of tasks with bounded concurrency.
+/// Concurrency is capped at 256 (tokio blocking pool limit).
 pub async fn run_downloads(
     client: &reqwest::Client,
     tasks: Vec<DownloadTask>,
@@ -18,6 +18,7 @@ pub async fn run_downloads(
     if total == 0 {
         return Ok(());
     }
+    let max_concurrent = max_concurrent.min(256);
     tracing::debug!(
         total = total,
         concurrency = max_concurrent,
@@ -73,7 +74,6 @@ async fn pipeline_inner(
         let csv_bytes = extract_zip_from_bytes::extract_csv_from_bytes(&zip_bytes)?;
         let df = csv_to_dataframe::csv_to_dataframe_sync(&csv_bytes)?;
         let df = csv_to_dataframe::set_column_types::convert_types(&df)?;
-        let df = data_clean::clean_dataframe(df)?;
         dataframe_to_parquet::write_parquet_sync(&task_dest, df)?;
         Ok::<_, crate::AppError>(())
     })

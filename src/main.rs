@@ -10,7 +10,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = data_downloader::config::Config::load()?;
-    data_downloader::run(&config).await?;
+    binance_data_downloader::run().await?;
     Ok(())
 }
