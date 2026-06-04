@@ -1,15 +1,16 @@
-pub mod dl_urls;
+pub mod builder;
 pub mod download;
 pub mod get_local_files;
 pub mod urls;
 
-use std::path::PathBuf;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::config::BatchConfig;
 use crate::config::get_start;
 use crate::AppError;
 
 #[derive(Debug, Clone)]
+/// A single file to download and its destination metadata.
 pub struct DownloadTask {
     pub url: String,
     pub dest: PathBuf,
@@ -17,21 +18,20 @@ pub struct DownloadTask {
     pub timeframe: String,
 }
 
+/// Download and process all daily klines for one symbol/timeframe pair.
 pub async fn run_one_pair(
     client: &reqwest::Client,
     symbol: &str,
     timeframe: &str,
-    start: Option<&str>,
-    end: Option<&str>,
-    dir: Option<&str>,
-    max_concurrent: usize,
+    cfg: &BatchConfig,
 ) -> Result<(), AppError> {
-    let data_dir = resolve_dir(dir);
-    let end = resolve_end(end);
+    let data_dir = PathBuf::from(&cfg.dir);
+    let end = cfg.end.as_deref().and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        .unwrap_or_else(|| chrono::Local::now().date_naive() - chrono::Duration::days(1));
 
     cleanup_tmp(&data_dir).await;
     let local = get_local_files::scan_local_files(&data_dir).await?;
-    let start = resolve_start(client, symbol, timeframe, start).await?;
+    let start = resolve_start(client, symbol, timeframe, cfg.start.as_deref()).await?;
 
     if start > end {
         tracing::warn!(
@@ -52,7 +52,7 @@ pub async fn run_one_pair(
         "processing symbol-timeframe pair",
     );
 
-    let tasks = dl_urls::build_download_tasks(symbol, timeframe, start, end, &local, &data_dir);
+    let tasks = builder::build_download_tasks(symbol, timeframe, start, end, &local, &data_dir);
 
     if !tasks.is_empty() {
         tracing::debug!(
@@ -60,19 +60,10 @@ pub async fn run_one_pair(
             date_range = %format!("{start}..{end}"),
             "downloading all",
         );
-        download::run_downloads(client, tasks, max_concurrent).await?;
+        download::run_downloads(client, tasks, cfg.max_concurrent.min(256)).await?;
     }
 
     Ok(())
-}
-
-fn resolve_dir(dir: Option<&str>) -> PathBuf {
-    dir.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("data"))
-}
-
-fn resolve_end(end: Option<&str>) -> chrono::NaiveDate {
-    end.and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-        .unwrap_or_else(|| chrono::Local::now().date_naive() - chrono::Duration::days(1))
 }
 
 async fn resolve_start(
@@ -85,6 +76,7 @@ async fn resolve_start(
     let cfg_start = start.and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
     Ok(cfg_start.map(|cs| cs.max(sym_start)).unwrap_or(sym_start))
 }
+
 async fn cleanup_tmp(data_dir: &Path) {
     let d = data_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {

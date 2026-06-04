@@ -1,6 +1,6 @@
-# symbol      = ["BTCUSDT"]     # 可选参数
-# timeframe   = ["1m", "5m"]     # 可选参数
-# max_concurrent = 1000          # 可选参数, 默认值: 1000
-# start       = "2020-01-01"    # 可选参数
-# end         = "2025-01-01"    # 可选参数
-# dir         = "data"          # 可选参数, 默认值: ./data
+symbol = ["BTCUSDT"] # 必须
+timeframe = ["1d"]   # 必须
+# start = "2020-01-01" # 可选,默认从交易所获取
+# end = "2025-01-01"  # 可选, 默认昨天
+# dir = "data"        # 可选, 默认 cwd/data
+# max_concurrent = 256 # 可选, 默认 256

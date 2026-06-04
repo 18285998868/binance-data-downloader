@@ -1,8 +1,11 @@
 use backoff::future::retry;
+use backoff::Error as BackoffError;
 
-use crate::config::retry::{default_backoff, BackoffError};
 use crate::task::DownloadTask;
+use crate::utils::default_backoff::default_backoff;
 
+
+/// Download a file with exponential backoff retry, returning raw bytes.
 pub async fn download_bytes_with_retry(
     client: &reqwest::Client,
     task: &DownloadTask,

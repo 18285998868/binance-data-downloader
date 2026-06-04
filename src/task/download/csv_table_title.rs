@@ -13,6 +13,7 @@ const DEFAULT_COLUMNS: [&str; 12] = [
     "ignore",
 ];
 
+/// Generate a default CSV header row for n columns (uses Binance column names for 11/12).
 pub fn default_header(count: usize) -> Vec<String> {
     match count {
         11 | 12 => DEFAULT_COLUMNS[..count.min(DEFAULT_COLUMNS.len())]
@@ -23,13 +24,16 @@ pub fn default_header(count: usize) -> Vec<String> {
     }
 }
 
+/// Detect whether raw CSV bytes start with a header row (non-numeric first field).
 pub fn detect_header(bytes: &[u8]) -> bool {
-    let mut lines = bytes.split(|b| *b == b'\n');
+    let newline = 10u8;
+    let comma = 44u8;
+    let mut lines = bytes.split(|&c| c == newline);
     let first = match lines.next() {
         Some(line) if !line.is_empty() => line,
         _ => return true,
     };
-    let first_field = first.split(|b| *b == b',').next().unwrap_or(b"");
+    let first_field = first.split(|&c| c == comma).next().unwrap_or(b"");
     let s = std::str::from_utf8(first_field).unwrap_or("");
     s.trim().parse::<f64>().is_err()
 }

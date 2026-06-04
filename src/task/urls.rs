@@ -1,3 +1,4 @@
+/// A download URL with its relative storage path and metadata.
 pub struct DownloadUrl {
     pub url: String,
     pub rel_path: String,
@@ -7,12 +8,14 @@ pub struct DownloadUrl {
 
 const REL_PATH_PREFIX: &str = "futures/um/daily/klines";
 
+/// Generate daily kline download URLs for a date range.
 pub fn build_urls(
     pair: &str,
     tf: &str,
     date_start: chrono::NaiveDate,
     date_end: chrono::NaiveDate,
 ) -> Vec<DownloadUrl> {
+    if date_start > date_end { return Vec::new(); }
     let n_days = ((date_end - date_start).num_days() as usize).max(1);
     let mut result = Vec::with_capacity(n_days);
 

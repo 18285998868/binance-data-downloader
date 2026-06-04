@@ -1,5 +1,0 @@
-symbol = "BTCUSDT"    # 必须, 默认值: 无
-timeframe = "1d"      # 必须, 默认值: 无
-# start   = "2020-01-01"  # 可选参数
-# end     = "2025-01-01"  # 可选参数
-# dir     = "data"        # 可选参数, 默认值: ./data

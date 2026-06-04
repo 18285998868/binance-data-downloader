@@ -1,16 +1,14 @@
 pub mod config;
+pub mod utils;
 pub mod error;
 pub mod task;
 
 pub use error::AppError;
 
 use futures::stream::{self, StreamExt};
-
 use config::get_symbols;
 
-const DEFAULT_TIMEFRAMES: &[&str] = &[
-    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d",
-];
+
 
 /// Runs a batch download across all configured symbol/timeframe pairs.
 ///
@@ -18,7 +16,7 @@ const DEFAULT_TIMEFRAMES: &[&str] = &[
 /// Binance exchangeInfo API. Pairs are processed in parallel across available
 /// CPU cores; each pair uses file-level concurrency capped at 256.
 pub async fn run() -> Result<(), AppError> {
-    let config = config::load::load_batch_config()?;
+    let config = config::load_cfg(None)?;
     let max_concurrent = config.max_concurrent.min(256);
     if config.max_concurrent > 256 {
         tracing::warn!(
@@ -31,7 +29,7 @@ pub async fn run() -> Result<(), AppError> {
     let client = get_symbols::build_client(max_concurrent)?;
 
     let symbols = get_symbols::resolve_symbols(&client, &config.symbol).await?;
-    let timeframes = resolve_timeframes(&config.timeframe);
+    let timeframes = config.timeframe.clone();
 
     if symbols.is_empty() {
         tracing::warn!("no symbols resolved, nothing to download");
@@ -60,15 +58,13 @@ pub async fn run() -> Result<(), AppError> {
         "starting batch download",
     );
 
-    let start = config.start.as_deref();
-    let end = config.end.as_deref();
-    let dir = Some(config.dir.as_str());
     let results: Vec<Option<String>> = stream::iter(pairs.into_iter().map(|(sym, tf)| {
         let client = client.clone();
+        let cfg = config.clone();
         async move {
             tracing::info!(symbol = %sym, timeframe = %tf, "running pair");
             if let Err(e) =
-                task::run_one_pair(&client, &sym, &tf, start, end, dir, max_concurrent).await
+                task::run_one_pair(&client, &sym, &tf, &cfg).await
             {
                 tracing::error!(symbol = %sym, timeframe = %tf, "failed: {e}");
                 Some(format!("{sym}/{tf}: {e}"))
@@ -96,9 +92,3 @@ pub async fn run() -> Result<(), AppError> {
     }
 }
 
-fn resolve_timeframes(configured: &[String]) -> Vec<String> {
-    if !configured.is_empty() {
-        return configured.to_vec();
-    }
-    DEFAULT_TIMEFRAMES.iter().map(|s| s.to_string()).collect()
-}

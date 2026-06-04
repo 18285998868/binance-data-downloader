@@ -1,9 +1,10 @@
 use backoff::future::retry;
+use backoff::Error as BackoffError;
 use moka::future::Cache;
 use std::sync::LazyLock;
 
-use super::retry::{default_backoff, BackoffError};
 use crate::AppError;
+use crate::utils::default_backoff::default_backoff;
 
 static START_DATE_CACHE: LazyLock<Cache<String, String>> =
     LazyLock::new(|| Cache::builder().max_capacity(50_000).build());
@@ -14,6 +15,8 @@ fn klines_url(symbol: &str, timeframe: &str) -> String {
     )
 }
 
+
+/// Fetch (or cache-lookup) the earliest kline open time for a symbol/timeframe.
 pub async fn get_first_kline_date(
     client: &reqwest::Client,
     symbol: &str,

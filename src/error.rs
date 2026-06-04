@@ -1,6 +1,8 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
+/// Top-level error type for the binance-data-downloader crate.
 pub enum AppError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),

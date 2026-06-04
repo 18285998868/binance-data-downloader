@@ -1,5 +1,6 @@
 use polars::prelude::*;
 
+/// Cast open_time/close_time/count to Int64, all other columns to Float64.
 pub fn convert_types(df: &DataFrame) -> Result<DataFrame, crate::AppError> {
     let mut series = Vec::with_capacity(df.width());
     for name in df.get_column_names() {
