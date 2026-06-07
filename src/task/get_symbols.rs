@@ -12,9 +12,11 @@ pub async fn resolve_symbols(
     if !configured.is_empty() {
         return Ok(configured.to_vec());
     }
-    let info = common::exchange_info::get_exchange_info(client)
+    let raw = common::exchange_info::get_exchange_info(client)
         .await
         .map_err(|e| AppError::Data(e.to_string()))?;
+    let info: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|e| AppError::Data(format!("parse exchange info: {e}")))?;
     let symbols = info["symbols"]
         .as_array()
         .ok_or_else(|| AppError::Data("missing symbols array".into()))?;
