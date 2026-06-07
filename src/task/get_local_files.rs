@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::AppError;
+
 /// Scan data_dir for existing .zip/.parquet files, normalizing .parquet to .zip keys.
-pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, crate::AppError> {
+pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, AppError> {
     let dir = data_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut files = HashSet::new();
@@ -19,10 +21,10 @@ pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, crate:
                 files.insert(normalize_to_zip(&s));
             }
         }
-        Ok::<_, crate::AppError>(files)
+        Ok::<_, AppError>(files)
     })
     .await
-    .map_err(|e| crate::AppError::Join(format!("spawn: {e}")))?
+    .map_err(AppError::from)?
 }
 
 fn normalize_to_zip(p: &str) -> String {

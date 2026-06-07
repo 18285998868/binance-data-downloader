@@ -1,20 +1,17 @@
 use backoff::future::retry;
 use backoff::Error as BackoffError;
-use moka::future::Cache;
-use std::sync::LazyLock;
 
 use crate::AppError;
-use crate::utils::default_backoff::default_backoff;
+use common::cache;
+use common::default_backoff::default_backoff;
 
-static START_DATE_CACHE: LazyLock<Cache<String, String>> =
-    LazyLock::new(|| Cache::builder().max_capacity(50_000).build());
+const CACHE_DOMAIN: &str = "start_date";
 
 fn klines_url(symbol: &str, timeframe: &str) -> String {
     format!(
         "https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={timeframe}&limit=1&startTime=0"
     )
 }
-
 
 /// Fetch (or cache-lookup) the earliest kline open time for a symbol/timeframe.
 pub async fn get_first_kline_date(
@@ -23,15 +20,15 @@ pub async fn get_first_kline_date(
     timeframe: &str,
 ) -> Result<chrono::NaiveDate, AppError> {
     let key = format!("{symbol}:{timeframe}");
-    if let Some(cached) = START_DATE_CACHE.get(&key).await {
-        let d = chrono::NaiveDate::parse_from_str(&cached, "%Y-%m-%d")
+    if let Some(cached) = cache::read(CACHE_DOMAIN, &key) {
+        let s = std::str::from_utf8(&cached)
+            .map_err(|e| AppError::Data(e.to_string()))?;
+        let d = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
             .map_err(|e| AppError::Date(e.to_string()))?;
         return Ok(d);
     }
     let date = fetch_first_kline(client, symbol, timeframe).await?;
-    START_DATE_CACHE
-        .insert(key, date.format("%Y-%m-%d").to_string())
-        .await;
+    cache::write(CACHE_DOMAIN, &key, date.format("%Y-%m-%d").to_string().as_bytes());
     Ok(date)
 }
 

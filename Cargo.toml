@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+common = { path = "../common" }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
@@ -23,7 +24,6 @@ anyhow = { workspace = true }
 dotenvy = { workspace = true }
 
 backoff = { version = "0.4", features = ["tokio"] }
-moka = { workspace = true, features = ["future"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -2,7 +2,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
-/// Top-level error type for the binance-data-downloader crate.
 pub enum AppError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
@@ -34,9 +33,9 @@ pub enum AppError {
     #[error("Download failed for {url}: {reason}")]
     DownloadFailed { url: String, reason: String },
 
-    #[error("Not found: {url}")]
+    #[error("Not found")]
     NotFound { url: String },
 
     #[error("Task join error: {0}")]
-    Join(String),
+    Join(#[from] tokio::task::JoinError),
 }
