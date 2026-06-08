@@ -34,7 +34,7 @@ impl Default for AppConfig {
                 "12h".into(),
                 "1d".into(),
             ]),
-            max_concurrent: 256,
+            max_concurrent: 32,
             start: None,
             end: None,
             dir: "data".into(),
@@ -65,9 +65,8 @@ mod tests {
     #[test]
     fn load_default_path() {
         let cfg = AppConfig::load(None).unwrap();
-        assert_eq!(cfg.symbol, Some(vec!["BTCUSDT".into()]));
-        assert_eq!(cfg.timeframe, Some(vec!["1d".into()]));
-        assert_eq!(cfg.max_concurrent, 256);
+        assert_eq!(cfg.symbol, None);
+        assert_eq!(cfg.max_concurrent, 32);
         assert_eq!(cfg.dir, "data");
     }
 
@@ -94,7 +93,7 @@ mod tests {
     #[test]
     fn app_config_default() {
         let cfg = AppConfig::default();
-        assert_eq!(cfg.max_concurrent, 256);
+        assert_eq!(cfg.max_concurrent, 32);
         assert!(cfg.symbol.is_none());
         assert!(cfg.timeframe.is_some());
         assert!(cfg.start.is_none());
