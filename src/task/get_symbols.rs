@@ -42,14 +42,46 @@ mod tests {
     #[ignore = "requires network; run manually with --include-ignored"]
     #[tokio::test]
     async fn test_fetch_from_exchange_info() {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap();
+        let client = get_proxy_fallback_client().await;
         let result = resolve_symbols(&client, &[]).await.unwrap();
         assert!(result.len() > 100, "should have >100 TRADING symbols");
         assert!(result.contains(&"BTCUSDT".to_string()));
         assert!(result.contains(&"ETHUSDT".to_string()));
+    }
+
+    /// Build a client that tries direct first, then falls back to SOCKS5 proxy.
+    async fn get_proxy_fallback_client() -> reqwest::Client {
+        use std::time::Duration;
+        if tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect("fapi.binance.com:443"),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .is_some()
+        {
+            return reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .unwrap();
+        }
+        if tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect("127.0.0.1:7890"),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .is_some()
+        {
+            return reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .proxy(reqwest::Proxy::all("socks5h://127.0.0.1:7890").unwrap())
+                .build()
+                .unwrap();
+        }
+        panic!("no network (tried direct and SOCKS5 proxy at 127.0.0.1:7890)");
     }
 
     #[tokio::test]

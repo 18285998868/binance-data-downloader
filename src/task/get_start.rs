@@ -20,7 +20,7 @@ pub async fn get_first_kline_date(
     timeframe: &str,
 ) -> Result<chrono::NaiveDate, AppError> {
     let key = format!("{symbol}:{timeframe}");
-    if let Some(cached) = cache::read(CACHE_DOMAIN, &key) {
+    if let Some(cached) = cache::read(CACHE_DOMAIN, &key, None) {
         let s = std::str::from_utf8(&cached)
             .map_err(|e| AppError::Data(e.to_string()))?;
         let d = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
