@@ -24,7 +24,10 @@ pub fn default_header(count: usize) -> Vec<String> {
     }
 }
 
-/// Detect whether raw CSV bytes start with a header row (non-numeric first field).
+/// Detect whether raw CSV bytes start with a header row.
+///
+/// Checks if the first field starts with a known Binance kline column name,
+/// falling back to the numeric heuristic for other formats.
 pub fn detect_header(bytes: &[u8]) -> bool {
     let newline = 10u8;
     let comma = 44u8;
@@ -35,7 +38,12 @@ pub fn detect_header(bytes: &[u8]) -> bool {
     };
     let first_field = first.split(|&c| c == comma).next().unwrap_or(b"");
     let s = std::str::from_utf8(first_field).unwrap_or("");
-    s.trim().parse::<f64>().is_err()
+    let s = s.trim();
+    // Binance kline columns
+    if s == "open_time" || s == "Open time" || s == "open" {
+        return true;
+    }
+    s.parse::<f64>().is_err()
 }
 
 #[cfg(test)]
@@ -87,5 +95,19 @@ mod tests {
     fn detect_header_partial_float() {
         let data = b"abc,def\n1,2\n";
         assert!(detect_header(data));
+    }
+
+    #[test]
+    fn detect_header_binance_kline() {
+        // 12-column Binance kline CSV with open_time header
+        let data = b"open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore\n1729008000000,1.0,2.0,3.0,4.0,5.0,6.0,7.0,8,9.0,10.0,0\n";
+        assert!(detect_header(data));
+    }
+
+    #[test]
+    fn detect_header_timestamp_first_col_no_header() {
+        // First column is a numeric timestamp -> no header
+        let data = b"1729008000000,1.0,2.0,3.0,4.0\n1729094400000,5.0,6.0,7.0,8.0\n";
+        assert!(!detect_header(data));
     }
 }

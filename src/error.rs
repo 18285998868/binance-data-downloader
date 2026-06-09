@@ -28,7 +28,7 @@ pub enum AppError {
     Date(String),
 
     #[error("UTF-8 error: {0}")]
-    Utf8(String),
+    Utf8(#[from] std::str::Utf8Error),
 
     #[error("Download failed for {url}: {reason}")]
     DownloadFailed { url: String, reason: String },

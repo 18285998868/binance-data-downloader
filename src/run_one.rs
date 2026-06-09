@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::config::AppConfig;
 use crate::AppError;
+use crate::config::AppConfig;
 
 /// Download and convert one symbol/timeframe pair.
 ///
@@ -19,7 +19,6 @@ pub async fn run_one(
         .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
         .unwrap_or_else(|| chrono::Local::now().date_naive() - chrono::Duration::days(1));
 
-    cleanup_tmp(&data_dir).await;
     let local = crate::task::get_local_files::scan_local_files(&data_dir).await?;
     let start = resolve_start(client, symbol, timeframe, cfg.start.as_deref()).await?;
 
@@ -42,8 +41,9 @@ pub async fn run_one(
         "processing symbol-timeframe pair",
     );
 
-    let tasks =
-        crate::task::builder::build_download_tasks(symbol, timeframe, start, end, &local, &data_dir);
+    let tasks = crate::task::builder::build_download_tasks(
+        symbol, timeframe, start, end, &local, &data_dir,
+    );
 
     if !tasks.is_empty() {
         tracing::debug!(
@@ -52,7 +52,7 @@ pub async fn run_one(
             end = %end,
             "downloading all",
         );
-        crate::task::download::run_downloads(client, tasks, cfg.max_concurrent.min(256)).await?;
+        crate::task::download::run_downloads(client, tasks, cfg.max_concurrent).await?;
     }
 
     Ok(())
@@ -74,25 +74,6 @@ fn resolve_start_date(
     cfg_start: Option<chrono::NaiveDate>,
 ) -> chrono::NaiveDate {
     cfg_start.map(|cs| cs.max(sym_start)).unwrap_or(sym_start)
-}
-
-async fn cleanup_tmp(data_dir: &Path) {
-    let d = data_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        for entry in walkdir::WalkDir::new(&d).into_iter().filter_map(|e| e.ok()) {
-            if entry.file_type().is_file()
-                && entry.path().extension().is_some_and(|x| x == "tmp")
-                && let Err(err) = std::fs::remove_file(entry.path())
-            {
-                tracing::warn!(
-                    path = %entry.path().display(),
-                    "failed to remove tmp file: {err}",
-                );
-            }
-        }
-    })
-    .await
-    .ok();
 }
 
 #[cfg(test)]

@@ -6,75 +6,87 @@
 
 ```
 config/
-  config.toml          # 批量下载配置
-  run_once.toml        # 单 (symbol, timeframe) 配置
+  config.toml              # 批量下载配置
 src/
-  main.rs              # 入口
-  lib.rs               # 顶层 run() -> run_batch::run()
-  error.rs             # AppError 定义
-  run_batch/
-    mod.rs
-    config.rs          # BatchConfig
-    load.rs            # 加载 config.toml (调用 common::config::load_toml)
-    run_batch.rs       # 展开 symbol×timeframe, 依次调用 run_once
-  run_once/
-    mod.rs
-    config.rs          # RunOnceConfig
-    get_start.rs       # 获取合约首根K线日期 (moka 缓存)
-    run_once.rs        # 单对下载编排: 构建URL→扫描本地→过滤→分块下载→处理→写入Parquet
+  main.rs                  # 入口: 初始化 tracing → run()
+  lib.rs                   # 模块导出 + re-export run()
+  error.rs                 # AppError 定义 (thiserror)
+  config.rs                # AppConfig (config crate)
+  runner.rs                # run(): 加载配置, 展开 symbol × timeframe, 并发调度
+  run_one.rs               # run_one(): 单对下载编排 (resolve_start → scan → build → download)
   task/
-    mod.rs             # DownloadTask 定义
-    urls.rs            # 构建下载 URL
-    local_file.rs      # 扫描本地已下载文件
-  downloader/          # 下载→解压→CSV→类型转换→清洗→Parquet 流水线
-  clean.rs             # .tmp 文件清理
+    mod.rs                 # DownloadTask 结构体
+    builder.rs             # build_download_tasks(): URL → 过滤本地已有 → DownloadTask
+    urls.rs                # build_urls(): 按日期生成 Binance 下载 URL
+    get_local_files.rs     # scan_local_files(): 扫描 data_dir 已有 zip/parquet
+    get_start.rs           # get_first_kline_date(): 交易所首根 K 线日期 (redb 缓存)
+    get_symbols.rs         # resolve_symbols(): 配置列表 or 从 exchangeInfo 拉取
+    download/
+      mod.rs               # run_downloads(): 并发下载 + 聚合结果; csv_to_dataframe_sync()
+      download_bytes.rs    # download_bytes_with_retry(): HTTP GET + backoff 重试
+      extract_zip.rs       # extract_csv_from_bytes(): 从 zip 提取 csv
+      csv_table_title.rs   # detect_header() / default_header(): 表头检测与生成
+      csv_set_col_types.rs # convert_types(): open_time/close_time/count → Int64, 其余 → Float64
+      df_to_parquet.rs     # write_parquet_sync(): 原子写入 (tmp → rename)
 tests/
-  integration.rs       # 集成测试
+  common/mod.rs            # 测试公共函数
+  download.rs              # 网络集成测试: 下载 ZIP, 404, 批量
+  integration.rs           # 集成测试: 本地扫描 → URL → 跳过
+  pipeline.rs              # 端到端: download → parquet 验证; 跳过已有文件
 ```
 
-## 批量下载 (run_batch)
+## 配置
 
 ```toml
 # config/config.toml
-symbol = ["BTCUSDT", "ETHUSDT"]   # 必须
-timeframe = ["1m", "5m", "1h"]    # 必须
-# max_concurrent = 1000           # 文件级并发, 默认 1000
-# start = "2020-01-01"            # 可选, 默认从交易所获取
-# end   = "2025-01-01"            # 可选, 默认昨天
-# dir   = "data"                  # 可选, 默认 ./data
-```
-
-## 单对下载 (run_once)
-
-```toml
-# config/run_once.toml
-symbol = "BTCUSDT"         # 必须
-timeframe = "1d"           # 必须
-# start = "2020-01-01"     # 可选, 默认从交易所获取
-# end   = "2025-01-01"     # 可选, 默认昨天
-# dir   = "data"           # 可选, 默认 ./data
+# symbol = ["BTCUSDT"]    # 可选, 默认: 从交易所自动获取全量 TRADING 符号
+# timeframe = ["1d"]      # 可选, 默认: 全部 12 个周期
+# start = "2020-01-01"    # 可选, 默认: 交易所首根 K 线日期
+# end = "2025-01-01"      # 可选, 默认: 昨天
+# dir = "data"            # 可选, 默认: data
+# max_concurrent = 32     # 可选, 默认: 32, pair 级别和文件级别共用, 上限 512
 ```
 
 ## 用法
 
 ```bash
-cargo run -p data-downloader
+cargo run -p binance-data-downloader
+```
+
+## 测试
+
+```bash
+# 单元测试 + mock 测试
+cargo test -p binance-data-downloader
+
+# 含网络测试
+cargo test -p binance-data-downloader -- --include-ignored
 ```
 
 ## 执行流程
 
 ```
 run()
-  └─ run_batch::run()
-       ├─ 加载 config.toml
-       ├─ 构建 HTTP client
-       ├─ 遍历 (symbol × timeframe)
-       │    顺序执行, 每个 pair 内部文件级并发
-       │    └─ run_once::run_once()
-       │         ├─ get_start::get_first_kline_date() (moka 缓存)
-       │         ├─ scan_local_files()
-       │         ├─ 按 30 天分块
-       │         └─ 下载→解压→CSV→类型转换→清洗→写入 Parquet
-       │               文件级并发 buffer_unordered(max_concurrent)
-       └─ 完成
+  ├─ 加载 config.toml
+  ├─ cleanup_tmp()  (清理 .tmp 残留文件, 仅执行一次)
+  ├─ 构建 HTTP client (LazyLock 全局单例)
+  ├─ 解析 symbol / timeframe
+  ├─ 笛卡尔积 → pairs[]
+  │
+  └─ buffer_unordered(max_concurrent)  (pair 级别并发)
+       └─ run_one()
+            ├─ resolve_start(): 交易所首根日期 (redb 缓存)
+            ├─ scan_local_files(): 扫描已有 zip/parquet → 过滤
+            ├─ build_download_tasks(): 按天生成 URL → 跳过已存在
+            │
+            └─ run_downloads()  (文件级别并发)
+                 └─ download_bytes_with_retry()  (backoff 重试)
+                      ├─ 404 → Permanent (不重试)
+                      ├─ 5xx/网络错误 → Transient (重试)
+                      └─ 空 body → Permanent (不重试)
+                 └─ process_zip()  (spawn_blocking)
+                      ├─ extract_csv_from_bytes()
+                      ├─ csv_to_dataframe_sync()  (自动检测表头)
+                      ├─ convert_types()  (Int64 / Float64)
+                      └─ write_parquet_sync()  (tmp → rename 原子写)
 ```

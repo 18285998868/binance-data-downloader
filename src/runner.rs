@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
 
-use crate::config;
 use crate::AppError;
+use crate::config;
 
 /// Run the full batch download pipeline.
 ///
@@ -12,23 +12,22 @@ use crate::AppError;
 /// 3. Cartesian product → parallel per-pair downloads
 pub async fn run() -> Result<(), AppError> {
     let cfg = Arc::new(config::AppConfig::load(None)?);
-    let max_concurrent = cfg.max_concurrent.min(256);
-    if cfg.max_concurrent > 256 {
+    let max_concurrent = cfg.max_concurrent.min(512);
+    if cfg.max_concurrent > 512 {
         tracing::warn!(
             configured = cfg.max_concurrent,
-            effective = 256,
-            "capping max_concurrent to 256 (tokio blocking pool limit)",
+            effective = 512,
+            "capping max_concurrent to 512 (tokio blocking pool limit)",
         );
     }
 
-    let client = common::http_client::build_client(max_concurrent)
-        .map_err(|e| AppError::Data(e.to_string()))?;
+    let client = common::http_client::build_client();
 
-    let symbols = crate::task::get_symbols::resolve_symbols(
-        &client,
-        cfg.symbol.as_deref().unwrap_or(&[]),
-    )
-    .await?;
+    cleanup_tmp(&cfg.dir).await;
+
+    let symbols =
+        crate::task::get_symbols::resolve_symbols(&client, cfg.symbol.as_deref().unwrap_or(&[]))
+            .await?;
     let timeframes = cfg.timeframe.clone().unwrap_or_default();
 
     if symbols.is_empty() {
@@ -42,15 +41,10 @@ pub async fn run() -> Result<(), AppError> {
 
     let pairs = build_pairs(&symbols, &timeframes);
 
-    let n_cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-
     tracing::info!(
         symbols = symbols.len(),
         timeframes = timeframes.len(),
         pairs = pairs.len(),
-        parallelism = n_cores,
         max_concurrent = max_concurrent,
         "starting batch download",
     );
@@ -68,7 +62,7 @@ pub async fn run() -> Result<(), AppError> {
             }
         }
     }))
-    .buffer_unordered(n_cores)
+    .buffer_unordered(max_concurrent)
     .collect()
     .await;
 
@@ -96,6 +90,26 @@ fn collect_errors(results: Vec<Option<String>>) -> Result<(), AppError> {
             errors.join("; ")
         )))
     }
+}
+
+/// Remove stale .tmp files from data directory once before batch starts.
+async fn cleanup_tmp(data_dir: &str) {
+    let d = std::path::PathBuf::from(data_dir);
+    tokio::task::spawn_blocking(move || {
+        for entry in walkdir::WalkDir::new(&d).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file()
+                && entry.path().extension().is_some_and(|x| x == "tmp")
+                && let Err(err) = std::fs::remove_file(entry.path())
+            {
+                tracing::warn!(
+                    path = %entry.path().display(),
+                    "failed to remove tmp file: {err}",
+                );
+            }
+        }
+    })
+    .await
+    .ok();
 }
 
 #[cfg(test)]

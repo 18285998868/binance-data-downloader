@@ -27,3 +27,5 @@ backoff = { version = "0.4", features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = "0.6"
+tokio = { workspace = true }

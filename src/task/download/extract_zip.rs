@@ -14,8 +14,7 @@ pub fn extract_csv_from_bytes(zip_bytes: &[u8]) -> Result<Vec<u8>, crate::AppErr
         }
         let name = entry.name();
         if name.ends_with(".csv") || name.ends_with(".CSV") {
-            let cap = (entry.size() as usize).min(100 * 1024 * 1024);
-            let mut buf = Vec::with_capacity(cap);
+            let mut buf = Vec::with_capacity(entry.size() as usize);
             entry
                 .read_to_end(&mut buf)
                 .map_err(|e| crate::AppError::Data(format!("read csv: {e}")))?;
