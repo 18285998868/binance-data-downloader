@@ -51,6 +51,8 @@ tests/
 
 ```bash
 cargo run -p binance-data-downloader
+cargo build -p binance-data-downloader --release
+target/release/binance-data-downloader --config creats/binance-data-downloader/config/config.toml
 ```
 
 ## 测试
