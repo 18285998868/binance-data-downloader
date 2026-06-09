@@ -8,13 +8,12 @@
 |end|昨天|
 
 ```
+目录扫描::src/task/get_local_files.rs::遍历目录一次完成: *.tmp删除 + .zip/.parquet归一化.zip(key用于跳过已缓存)
 展开symbol x timeframe 笛卡尔积->for each -> 获取开始时间(symbol,timeframe,start)->构建urls->FuturesUnordered并发下载(无人工限制,由reqwest连接池管理)
 
 并发下载:
 下载->解压到内存->csv处理->原子写入parquet
 ```
-
-目录扫描::src/task/get_local_files.rs::遍历目录一次完成: *.tmp删除 + .zip/.parquet归一化.zip(key用于跳过已缓存)
 
 TODO:
 库使用:
