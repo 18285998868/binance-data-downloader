@@ -10,7 +10,6 @@ use crate::AppError;
 pub struct AppConfig {
     pub symbol: Option<Vec<String>>,
     pub timeframe: Option<Vec<String>>,
-    pub max_concurrent: usize,
     pub start: Option<String>,
     pub end: Option<String>,
     pub dir: String,
@@ -34,7 +33,6 @@ impl Default for AppConfig {
                 "12h".into(),
                 "1d".into(),
             ]),
-            max_concurrent: 32,
             start: None,
             end: None,
             dir: "data".into(),
@@ -44,12 +42,23 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn load(path: Option<&Path>) -> Result<Self, AppError> {
-        let default_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("config")
-            .join("config.toml");
-        let p = path.unwrap_or(&default_path);
+        let p = match path {
+            Some(p) => p.to_path_buf(),
+            None => {
+                let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml");
+                if dev.exists() {
+                    dev
+                } else {
+                    let exe = std::env::current_exe()
+                        .map_err(|e| AppError::Config(e.to_string()))?;
+                    exe.parent()
+                        .unwrap_or(&exe)
+                        .join("config/config.toml")
+                }
+            }
+        };
         Config::builder()
-            .add_source(config::File::from(p))
+            .add_source(config::File::from(p.as_path()))
             .build()
             .map_err(|e| AppError::Config(e.to_string()))?
             .try_deserialize()
@@ -66,7 +75,6 @@ mod tests {
     fn load_default_path() {
         let cfg = AppConfig::load(None).unwrap();
         assert_eq!(cfg.symbol, None);
-        assert_eq!(cfg.max_concurrent, 32);
         assert_eq!(cfg.dir, "data");
     }
 
@@ -93,7 +101,6 @@ mod tests {
     #[test]
     fn app_config_default() {
         let cfg = AppConfig::default();
-        assert_eq!(cfg.max_concurrent, 32);
         assert!(cfg.symbol.is_none());
         assert!(cfg.timeframe.is_some());
         assert!(cfg.start.is_none());

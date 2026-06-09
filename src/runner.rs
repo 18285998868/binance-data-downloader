@@ -1,29 +1,24 @@
 use std::sync::Arc;
 
-use futures::stream::{self, StreamExt};
+use futures::stream::{FuturesUnordered, StreamExt};
 
 use crate::AppError;
 use crate::config;
+use crate::task::get_local_files::scan_local_files;
 
 /// Run the full batch download pipeline.
 ///
 /// 1. Load config
 /// 2. Resolve symbols and timeframes
-/// 3. Cartesian product → parallel per-pair downloads
-pub async fn run() -> Result<(), AppError> {
-    let cfg = Arc::new(config::AppConfig::load(None)?);
-    let max_concurrent = cfg.max_concurrent.min(512);
-    if cfg.max_concurrent > 512 {
-        tracing::warn!(
-            configured = cfg.max_concurrent,
-            effective = 512,
-            "capping max_concurrent to 512 (tokio blocking pool limit)",
-        );
-    }
+/// 3. Scan existing local files (once)
+/// 4. Cartesian product → all pairs run concurrently (no artificial limit)
+pub async fn run(config_path: Option<&std::path::Path>) -> Result<(), AppError> {
+    let cfg = Arc::new(config::AppConfig::load(config_path)?);
 
     let client = common::http_client::build_client();
 
-    cleanup_tmp(&cfg.dir).await;
+    let data_dir = std::path::PathBuf::from(&cfg.dir);
+    let local = Arc::new(scan_local_files(&data_dir).await?);
 
     let symbols =
         crate::task::get_symbols::resolve_symbols(&client, cfg.symbol.as_deref().unwrap_or(&[]))
@@ -45,30 +40,33 @@ pub async fn run() -> Result<(), AppError> {
         symbols = symbols.len(),
         timeframes = timeframes.len(),
         pairs = pairs.len(),
-        max_concurrent = max_concurrent,
         "starting batch download",
     );
 
-    let results: Vec<Option<String>> = stream::iter(pairs.into_iter().map(|(sym, tf)| {
-        let client = client.clone();
-        let cfg = Arc::clone(&cfg);
-        async move {
-            tracing::info!(symbol = %sym, timeframe = %tf, "running pair");
-            if let Err(e) = crate::run_one::run_one(&client, &sym, &tf, &cfg).await {
-                tracing::error!(symbol = %sym, timeframe = %tf, "failed: {e}");
-                Some(format!("{sym}/{tf}: {e}"))
-            } else {
-                None
+    let results: Vec<Option<String>> = pairs
+        .into_iter()
+        .map(|(sym, tf)| {
+            let client = client.clone();
+            let cfg = Arc::clone(&cfg);
+            let local = Arc::clone(&local);
+            async move {
+                tracing::info!(symbol = %sym, timeframe = %tf, "running pair");
+                if let Err(e) = crate::run_one::run_one(&client, &sym, &tf, &cfg, &local).await {
+                    tracing::error!(symbol = %sym, timeframe = %tf, "failed: {e}");
+                    Some(format!("{sym}/{tf}: {e}"))
+                } else {
+                    None
+                }
             }
-        }
-    }))
-    .buffer_unordered(max_concurrent)
-    .collect()
-    .await;
+        })
+        .collect::<FuturesUnordered<_>>()
+        .collect()
+        .await;
 
     collect_errors(results)
 }
 
+/// Cartesian product of symbols × timeframes.
 fn build_pairs(symbols: &[String], timeframes: &[String]) -> Vec<(String, String)> {
     symbols
         .iter()
@@ -76,6 +74,7 @@ fn build_pairs(symbols: &[String], timeframes: &[String]) -> Vec<(String, String
         .collect()
 }
 
+/// Log and aggregate errors; return `Ok` if none, `Err(Data)` with summary otherwise.
 fn collect_errors(results: Vec<Option<String>>) -> Result<(), AppError> {
     let errors: Vec<String> = results.into_iter().flatten().collect();
 
@@ -90,26 +89,6 @@ fn collect_errors(results: Vec<Option<String>>) -> Result<(), AppError> {
             errors.join("; ")
         )))
     }
-}
-
-/// Remove stale .tmp files from data directory once before batch starts.
-async fn cleanup_tmp(data_dir: &str) {
-    let d = std::path::PathBuf::from(data_dir);
-    tokio::task::spawn_blocking(move || {
-        for entry in walkdir::WalkDir::new(&d).into_iter().filter_map(|e| e.ok()) {
-            if entry.file_type().is_file()
-                && entry.path().extension().is_some_and(|x| x == "tmp")
-                && let Err(err) = std::fs::remove_file(entry.path())
-            {
-                tracing::warn!(
-                    path = %entry.path().display(),
-                    "failed to remove tmp file: {err}",
-                );
-            }
-        }
-    })
-    .await
-    .ok();
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ async fn full_pipeline_single_day() {
 
     let parquet_path = tasks[0].dest.with_extension("parquet");
 
-    binance_data_downloader::task::download::run_downloads(&client, tasks, 4)
+    binance_data_downloader::task::download::run_downloads(&client, tasks)
         .await
         .expect("run_downloads should succeed");
 
@@ -108,7 +108,7 @@ async fn pipeline_skip_existing() {
     let new_parquet = tasks[0].dest.with_extension("parquet");
     assert!(!new_parquet.exists(), "2024-01-02 parquet should not exist yet");
 
-    binance_data_downloader::task::download::run_downloads(&client, tasks, 4)
+    binance_data_downloader::task::download::run_downloads(&client, tasks)
         .await
         .expect("run_downloads should succeed");
 

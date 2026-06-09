@@ -10,33 +10,29 @@ use polars::prelude::*;
 
 use crate::AppError;
 use crate::task::DownloadTask;
-use futures::stream::{self, StreamExt};
+use futures::stream::{FuturesUnordered, StreamExt};
 use tracing::Instrument;
 
 pub use download_bytes::download_bytes_with_retry;
 
-/// Download all tasks in parallel with a concurrency limit.
+/// Download all tasks in parallel — no artificial concurrency limit.
+///
+/// HTTP connection pooling is handled internally by `reqwest::Client`.
 pub async fn run_downloads(
     client: &reqwest::Client,
     tasks: Vec<DownloadTask>,
-    max_concurrent: usize,
 ) -> Result<(), AppError> {
-    // Delegate to parameterized inner for testability.
-    let download_fn = |c: reqwest::Client, t: DownloadTask| {
-        let t_clone = t;
-        async move {
-            let zip_bytes = download_bytes::download_bytes_with_retry(&c, &t_clone).await?;
-            process_zip(zip_bytes, t_clone.dest.with_extension("parquet")).await
-        }
+    let download_fn = move |c: reqwest::Client, t: DownloadTask| async move {
+        let zip_bytes = download_bytes::download_bytes_with_retry(&c, &t).await?;
+        process_zip(zip_bytes, t.dest.with_extension("parquet")).await
     };
-    run_downloads_inner(client, tasks, max_concurrent, download_fn).await
+    run_downloads_inner(client, tasks, download_fn).await
 }
 
 /// Core download orchestration, parameterized by the download function for testing.
 async fn run_downloads_inner<F, Fut>(
     client: &reqwest::Client,
     tasks: Vec<DownloadTask>,
-    max_concurrent: usize,
     download_fn: F,
 ) -> Result<(), AppError>
 where
@@ -47,21 +43,18 @@ where
     if total == 0 {
         return Ok(());
     }
-    let max_concurrent = max_concurrent.min(512);
-    tracing::debug!(
-        total = total,
-        concurrency = max_concurrent,
-        "downloading new files",
-    );
-    let results: Vec<_> = stream::iter(tasks.into_iter().map(|t| {
-        let c = client.clone();
-        let span = tracing::info_span!("download", pair = %t.pair, tf = %t.timeframe);
-        let fut = download_fn(c.clone(), t);
-        async move { fut.await }.instrument(span)
-    }))
-    .buffer_unordered(max_concurrent)
-    .collect()
-    .await;
+    tracing::debug!(total = total, "downloading new files");
+    let results: Vec<_> = tasks
+        .into_iter()
+        .map(|t| {
+            let c = client.clone();
+            let span = tracing::info_span!("download", pair = %t.pair, tf = %t.timeframe);
+            let fut = download_fn(c, t);
+            async move { fut.await }.instrument(span)
+        })
+        .collect::<FuturesUnordered<_>>()
+        .collect()
+        .await;
 
     aggregate_results(results)
 }
@@ -232,7 +225,7 @@ mod tests {
         let tasks = vec![];
         let download_fn = |_: reqwest::Client, _: DownloadTask| async { unreachable!() };
         assert!(
-            run_downloads_inner(&client, tasks, 4, download_fn)
+            run_downloads_inner(&client, tasks, download_fn)
                 .await
                 .is_ok()
         );
@@ -252,7 +245,7 @@ mod tests {
             }
         };
         assert!(
-            run_downloads_inner(&client, tasks, 4, download_fn)
+            run_downloads_inner(&client, tasks, download_fn)
                 .await
                 .is_ok()
         );
@@ -273,7 +266,7 @@ mod tests {
             }
         };
         assert!(
-            run_downloads_inner(&client, tasks, 4, download_fn)
+            run_downloads_inner(&client, tasks, download_fn)
                 .await
                 .is_ok()
         );
@@ -293,7 +286,7 @@ mod tests {
                 Ok(())
             }
         };
-        let err = run_downloads_inner(&client, tasks, 4, download_fn)
+        let err = run_downloads_inner(&client, tasks, download_fn)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("1/2 failed"));

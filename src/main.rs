@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -10,6 +11,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    binance_data_downloader::run().await?;
+    let config_path = std::env::args().find_map(|a| {
+        a.strip_prefix("--config=").map(PathBuf::from)
+    });
+
+    binance_data_downloader::run(config_path.as_deref()).await?;
     Ok(())
 }
