@@ -7,13 +7,12 @@ async fn pipeline_local_scan_to_urls_to_parquet() {
     let parquet_path = data_dir.join(format!("{existing_rel}.parquet"));
     std::fs::create_dir_all(parquet_path.parent().unwrap()).unwrap();
     {
-        let empty =
-            binance_data_downloader::task::download::csv_to_dataframe_sync(
-                b"open_time,open,high,low,close
+        let empty = binance_data_downloader::task::download::csv_to_dataframe_sync(
+            b"open_time,open,high,low,close
 1,100,101,99,100
 ",
-            )
-            .unwrap();
+        )
+        .unwrap();
         binance_data_downloader::task::download::df_to_parquet::write_parquet_sync(
             &parquet_path,
             empty,

@@ -18,7 +18,6 @@ pub fn write_parquet_sync(path: &Path, mut df: DataFrame) -> Result<(), crate::A
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use polars::prelude::*;

@@ -1,5 +1,5 @@
-use backoff::future::retry;
 use backoff::Error as BackoffError;
+use backoff::future::retry;
 
 use crate::AppError;
 use common::cache;
@@ -21,14 +21,17 @@ pub async fn get_first_kline_date(
 ) -> Result<chrono::NaiveDate, AppError> {
     let key = format!("{symbol}:{timeframe}");
     if let Some(cached) = cache::read(CACHE_DOMAIN, &key, None) {
-        let s = std::str::from_utf8(&cached)
-            .map_err(|e| AppError::Data(e.to_string()))?;
+        let s = std::str::from_utf8(&cached).map_err(|e| AppError::Data(e.to_string()))?;
         let d = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
             .map_err(|e| AppError::Date(e.to_string()))?;
         return Ok(d);
     }
     let date = fetch_first_kline(client, symbol, timeframe).await?;
-    cache::write(CACHE_DOMAIN, &key, date.format("%Y-%m-%d").to_string().as_bytes());
+    cache::write(
+        CACHE_DOMAIN,
+        &key,
+        date.format("%Y-%m-%d").to_string().as_bytes(),
+    );
     Ok(date)
 }
 
@@ -80,7 +83,9 @@ async fn fetch_first_kline(
             let ms = match first_elem.as_u64() {
                 Some(ms) => ms,
                 None => {
-                    return Err(BackoffError::Permanent(AppError::Api("open_time missing".into())));
+                    return Err(BackoffError::Permanent(AppError::Api(
+                        "open_time missing".into(),
+                    )));
                 }
             };
             let dt = match chrono::DateTime::from_timestamp_millis(ms as i64) {

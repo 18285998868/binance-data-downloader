@@ -16,7 +16,12 @@ async fn full_pipeline_single_day() {
     let start = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
     let end = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
     let tasks = binance_data_downloader::task::builder::build_download_tasks(
-        symbol, tf, start, end, &HashSet::new(), &data_dir,
+        symbol,
+        tf,
+        start,
+        end,
+        &HashSet::new(),
+        &data_dir,
     );
     assert_eq!(tasks.len(), 1, "should produce 1 task for 1 day");
 
@@ -39,7 +44,11 @@ async fn full_pipeline_single_day() {
     .finish()
     .expect("should read parquet back");
 
-    assert_eq!(df.width(), 12, "Binance kline parquet should have 12 columns");
+    assert_eq!(
+        df.width(),
+        12,
+        "Binance kline parquet should have 12 columns"
+    );
     assert!(df.height() > 0, "parquet should contain rows");
 
     let col_names: Vec<&str> = df.get_column_names().iter().map(|s| s.as_str()).collect();
@@ -63,8 +72,7 @@ async fn pipeline_skip_existing() {
     let data_dir = dir.path().join("data");
 
     // Pre-seed a stub parquet for 2024-01-01
-    let stub_rel =
-        "futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.parquet";
+    let stub_rel = "futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.parquet";
     let stub_path = data_dir.join(stub_rel);
     std::fs::create_dir_all(stub_path.parent().unwrap()).unwrap();
     let dummy_df = binance_data_downloader::task::download::csv_to_dataframe_sync(
@@ -72,8 +80,7 @@ async fn pipeline_skip_existing() {
     )
     .unwrap();
     binance_data_downloader::task::download::df_to_parquet::write_parquet_sync(
-        &stub_path,
-        dummy_df,
+        &stub_path, dummy_df,
     )
     .unwrap();
 
@@ -82,9 +89,7 @@ async fn pipeline_skip_existing() {
         .await
         .unwrap();
     assert!(
-        local.contains::<str>(
-            "futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip"
-        ),
+        local.contains::<str>("futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip"),
         "scan should normalize .parquet to .zip key, got: {local:?}",
     );
 
@@ -106,7 +111,10 @@ async fn pipeline_skip_existing() {
     );
 
     let new_parquet = tasks[0].dest.with_extension("parquet");
-    assert!(!new_parquet.exists(), "2024-01-02 parquet should not exist yet");
+    assert!(
+        !new_parquet.exists(),
+        "2024-01-02 parquet should not exist yet"
+    );
 
     binance_data_downloader::task::download::run_downloads(&client, tasks)
         .await

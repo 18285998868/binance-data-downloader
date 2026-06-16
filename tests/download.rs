@@ -24,8 +24,8 @@ async fn download_valid_zip() {
     assert!(bytes.len() > 100, "downloaded zip should be > 100 bytes");
 
     let cursor = std::io::Cursor::new(&bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .expect("downloaded bytes should be a valid zip archive");
+    let mut archive =
+        zip::ZipArchive::new(cursor).expect("downloaded bytes should be a valid zip archive");
     assert!(archive.len() > 0, "zip should contain at least one entry");
 
     let has_csv = (0..archive.len()).any(|i| {
@@ -82,15 +82,16 @@ async fn download_batch() {
 
     use futures::stream::{self, StreamExt};
 
-    let results: Vec<_> = stream::iter(tasks.iter().map(|t| {
-        let c = client.clone();
-        async move {
-            binance_data_downloader::task::download::download_bytes_with_retry(&c, t).await
-        }
-    }))
-    .buffer_unordered(4)
-    .collect()
-    .await;
+    let results: Vec<_> =
+        stream::iter(tasks.iter().map(|t| {
+            let c = client.clone();
+            async move {
+                binance_data_downloader::task::download::download_bytes_with_retry(&c, t).await
+            }
+        }))
+        .buffer_unordered(4)
+        .collect()
+        .await;
 
     let ok_count = results.iter().filter(|r| r.is_ok()).count();
     let nf_count = results

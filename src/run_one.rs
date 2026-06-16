@@ -42,9 +42,8 @@ pub async fn run_one(
         "processing symbol-timeframe pair",
     );
 
-    let tasks = crate::task::builder::build_download_tasks(
-        symbol, timeframe, start, end, local, &data_dir,
-    );
+    let tasks =
+        crate::task::builder::build_download_tasks(symbol, timeframe, start, end, local, &data_dir);
 
     if !tasks.is_empty() {
         tracing::debug!(

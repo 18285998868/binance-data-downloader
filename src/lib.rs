@@ -5,8 +5,8 @@
 
 pub mod config;
 pub mod error;
-pub mod runner;
 pub mod run_one;
+pub mod runner;
 pub mod task;
 
 pub use error::AppError;

@@ -38,7 +38,10 @@ mod tests {
             converted.column("open_time").unwrap().dtype(),
             &DataType::Int64
         );
-        assert_eq!(converted.column("open").unwrap().dtype(), &DataType::Float64);
+        assert_eq!(
+            converted.column("open").unwrap().dtype(),
+            &DataType::Float64
+        );
         assert_eq!(
             converted.column("close_time").unwrap().dtype(),
             &DataType::Int64
@@ -56,7 +59,10 @@ mod tests {
         )
         .unwrap();
         let converted = super::convert_types(&df).unwrap();
-        assert_eq!(converted.column("high").unwrap().dtype(), &DataType::Float64);
+        assert_eq!(
+            converted.column("high").unwrap().dtype(),
+            &DataType::Float64
+        );
         assert_eq!(converted.column("low").unwrap().dtype(), &DataType::Float64);
         assert_eq!(
             converted.column("volume").unwrap().dtype(),

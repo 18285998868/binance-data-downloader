@@ -15,7 +15,9 @@ pub fn build_urls(
     date_start: chrono::NaiveDate,
     date_end: chrono::NaiveDate,
 ) -> Vec<DownloadUrl> {
-    if date_start > date_end { return Vec::new(); }
+    if date_start > date_end {
+        return Vec::new();
+    }
     let n_days = ((date_end - date_start).num_days() as usize).max(1);
     let mut result = Vec::with_capacity(n_days);
 

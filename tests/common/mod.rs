@@ -22,10 +22,13 @@ pub fn download_url(symbol: &str, timeframe: &str, date: &str) -> String {
 }
 
 async fn try_direct() -> Option<reqwest::Client> {
-    tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect("data.binance.vision:443"))
-        .await
-        .ok()?
-        .ok()?;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect("data.binance.vision:443"),
+    )
+    .await
+    .ok()?
+    .ok()?;
     let client = reqwest::Client::builder()
         .user_agent("binance-data-downloader-test/0.1")
         .timeout(Duration::from_secs(30))
@@ -36,10 +39,13 @@ async fn try_direct() -> Option<reqwest::Client> {
 }
 
 async fn try_proxy() -> Option<reqwest::Client> {
-    tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect("127.0.0.1:7890"))
-        .await
-        .ok()?
-        .ok()?;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect("127.0.0.1:7890"),
+    )
+    .await
+    .ok()?
+    .ok()?;
     let client = reqwest::Client::builder()
         .user_agent("binance-data-downloader-test/0.1")
         .timeout(Duration::from_secs(60))

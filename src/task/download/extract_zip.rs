@@ -14,8 +14,9 @@ pub fn extract_csv_from_bytes(zip_bytes: &[u8]) -> Result<Vec<u8>, crate::AppErr
         }
         let name = entry.name();
         if name.ends_with(".csv") || name.ends_with(".CSV") {
-            let size = usize::try_from(entry.size())
-                .map_err(|_| crate::AppError::Data(format!("zip entry too large: {}", entry.size())))?;
+            let size = usize::try_from(entry.size()).map_err(|_| {
+                crate::AppError::Data(format!("zip entry too large: {}", entry.size()))
+            })?;
             let mut buf = Vec::with_capacity(size);
             entry
                 .read_to_end(&mut buf)

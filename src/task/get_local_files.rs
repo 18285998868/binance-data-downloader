@@ -48,7 +48,6 @@ fn normalize_to_zip(p: &str) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

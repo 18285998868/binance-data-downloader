@@ -49,11 +49,9 @@ impl AppConfig {
                 if dev.exists() {
                     dev
                 } else {
-                    let exe = std::env::current_exe()
-                        .map_err(|e| AppError::Config(e.to_string()))?;
-                    exe.parent()
-                        .unwrap_or(&exe)
-                        .join("config/config.toml")
+                    let exe =
+                        std::env::current_exe().map_err(|e| AppError::Config(e.to_string()))?;
+                    exe.parent().unwrap_or(&exe).join("config/config.toml")
                 }
             }
         };
