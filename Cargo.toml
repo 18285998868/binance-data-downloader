@@ -22,8 +22,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 dotenvy = { workspace = true }
-
-backoff = { version = "0.4", features = ["tokio"] }
+backoff = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
