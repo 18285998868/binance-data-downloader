@@ -2,7 +2,7 @@ use backoff::Error as BackoffError;
 use backoff::backoff::Backoff;
 use backoff::future::retry;
 
-use crate::task::DownloadTask;
+use crate::DownloadTask;
 use common::default_backoff::default_backoff;
 
 /// Download a file with exponential backoff retry, returning raw bytes.

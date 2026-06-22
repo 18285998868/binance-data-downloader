@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use super::{DownloadTask, urls};
+use crate::urls;
+use crate::DownloadTask;
 
 /// Build a list of DownloadTasks for a date range, skipping locally-present files.
 pub fn build_download_tasks(

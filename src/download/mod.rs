@@ -9,7 +9,7 @@ use std::future::Future;
 use polars::prelude::*;
 
 use crate::AppError;
-use crate::task::DownloadTask;
+use crate::DownloadTask;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tracing::Instrument;
 

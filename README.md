@@ -12,7 +12,7 @@ src/
   lib.rs                   # 模块导出 + re-export run()
   error.rs                 # AppError 定义 (thiserror)
   config.rs                # AppConfig (config crate)
-  runner.rs                # run(): 加载配置, 展开 symbol × timeframe, 并发调度
+  runner.rs                # run(): 加载配置, 串行遍历 symbol → timeframe
   run_one.rs               # run_one(): 单对下载编排 (resolve_start → scan → build → download)
   task/
     mod.rs                 # DownloadTask 结构体
@@ -28,11 +28,7 @@ src/
       csv_table_title.rs   # detect_header() / default_header(): 表头检测与生成
       csv_set_col_types.rs # convert_types(): open_time/close_time/count → Int64, 其余 → Float64
       df_to_parquet.rs     # write_parquet_sync(): 原子写入 (tmp → rename)
-tests/
-  common/mod.rs            # 测试公共函数
-  download.rs              # 网络集成测试: 下载 ZIP, 404, 批量
-  integration.rs           # 集成测试: 本地扫描 → URL → 跳过
-  pipeline.rs              # 端到端: download → parquet 验证; 跳过已有文件
+
 ```
 
 ## 配置
@@ -44,13 +40,13 @@ tests/
 # start = "2020-01-01"    # 可选, 默认: 交易所首根 K 线日期
 # end = "2025-01-01"      # 可选, 默认: 昨天
 # dir = "data"            # 可选, 默认: data
-# max_concurrent = 32     # 可选, 默认: 32, pair 级别和文件级别共用, 上限 512
+
 ```
 
 ## 用法
 
 ```bash
-cargo run -p binance-data-downloader
+cargo run -p binance-data-downloader --release
 cargo build -p binance-data-downloader --release
 target/release/binance-data-downloader --config creats/binance-data-downloader/config/config.toml
 ```
@@ -70,18 +66,17 @@ cargo test -p binance-data-downloader -- --include-ignored
 ```
 run()
   ├─ 加载 config.toml
-  ├─ cleanup_tmp()  (清理 .tmp 残留文件, 仅执行一次)
-  ├─ 构建 HTTP client (LazyLock 全局单例)
+  ├─ 构建 HTTP client
+  ├─ 扫描本地已有 zip/parquet (一次, 然后跳过已下载)
   ├─ 解析 symbol / timeframe
-  ├─ 笛卡尔积 → pairs[]
   │
-  └─ buffer_unordered(max_concurrent)  (pair 级别并发)
-       └─ run_one()
-            ├─ resolve_start(): 交易所首根日期 (redb 缓存)
-            ├─ scan_local_files(): 扫描已有 zip/parquet → 过滤
-            ├─ build_download_tasks(): 按天生成 URL → 跳过已存在
-            │
-            └─ run_downloads()  (文件级别并发)
+  └─ for each symbol (串行)
+       └─ for each timeframe (串行)
+            └─ run_one()
+                 ├─ resolve_start(): 交易所首根日期 (redb 缓存)
+                 ├─ build_download_tasks(): 按天生成 URL → 跳过已存在
+                 │
+                 └─ run_downloads()  (文件级别并发)
                  └─ download_bytes_with_retry()  (backoff 重试)
                       ├─ 404 → Permanent (不重试)
                       ├─ 5xx/网络错误 → Transient (重试)
