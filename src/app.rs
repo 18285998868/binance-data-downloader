@@ -143,20 +143,14 @@ mod tests {
     fn resolve_start_date_prefers_cfg() {
         let sym = chrono::NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
         let cfg = Some(chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
-        assert_eq!(
-            cfg.map(|cs| cs.max(sym)).unwrap_or(sym),
-            cfg.unwrap()
-        );
+        assert_eq!(cfg.map(|cs| cs.max(sym)).unwrap_or(sym), cfg.unwrap());
     }
 
     #[test]
     fn resolve_start_date_prefers_sym_when_later() {
         let sym = chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
         let cfg = Some(chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
-        assert_eq!(
-            cfg.map(|cs| cs.max(sym)).unwrap_or(sym),
-            sym
-        );
+        assert_eq!(cfg.map(|cs| cs.max(sym)).unwrap_or(sym), sym);
     }
 
     #[test]
