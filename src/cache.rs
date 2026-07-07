@@ -43,30 +43,32 @@ fn ensure_db(domain: &str) -> Option<Arc<Database>> {
     Some(db)
 }
 
+macro_rules! log_none {
+    ($expr:expr, $domain:expr, $msg:expr) => {
+        match $expr {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(target: $msg, domain = $domain, error = %e);
+                return None;
+            }
+        }
+    };
+    ($expr:expr, $domain:expr, $key:expr, $msg:expr) => {
+        match $expr {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(target: $msg, domain = $domain, key = $key, error = %e);
+                return None;
+            }
+        }
+    };
+}
+
 pub fn read(domain: &str, key: &str, ttl_secs: Option<u64>) -> Option<Vec<u8>> {
     let db = ensure_db(domain)?;
-    let read_tx = match db.begin_read() {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!(domain, "cache read begin_read: {e}");
-            return None;
-        }
-    };
-    let table = match read_tx.open_table(TABLE) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(domain, "cache read open_table: {e}");
-            return None;
-        }
-    };
-    let guard = match table.get(key) {
-        Ok(Some(g)) => g,
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::warn!(domain, key, "cache read get: {e}");
-            return None;
-        }
-    };
+    let read_tx = log_none!(db.begin_read(), domain, "cache read begin_read");
+    let table = log_none!(read_tx.open_table(TABLE), domain, "cache read open_table");
+    let guard = log_none!(table.get(key), domain, key, "cache read get")?;
     let raw = guard.value();
 
     if raw.len() < 8 {
@@ -115,5 +117,54 @@ pub fn write(domain: &str, key: &str, data: &[u8]) {
         }
     } else {
         tracing::error!(domain, key, "cache write begin_write failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Run tests in serial and redirect cache to a temp dir.
+    fn with_cache(f: impl FnOnce()) {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        DBS.lock().unwrap().clear();
+        f();
+        match prev {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        drop(_guard);
+    }
+
+    #[test]
+    fn write_then_read() {
+        with_cache(|| {
+            write("test_domain", "key1", b"hello");
+            let val = read("test_domain", "key1", None);
+            assert_eq!(val, Some(b"hello".to_vec()));
+        });
+    }
+
+    #[test]
+    fn read_missing_key() {
+        with_cache(|| {
+            let val = read("test_domain", "nonexistent", None);
+            assert_eq!(val, None);
+        });
+    }
+
+    #[test]
+    fn read_expired_entry() {
+        with_cache(|| {
+            write("test_domain", "key1", b"data");
+            // TTL = 0 → immediately expired
+            let val = read("test_domain", "key1", Some(0));
+            assert_eq!(val, None);
+        });
     }
 }

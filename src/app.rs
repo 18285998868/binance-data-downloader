@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::AppError;
@@ -54,7 +54,7 @@ pub async fn run(config_path: Option<&std::path::Path>) -> Result<(), AppError> 
     for symbol in &symbols {
         for timeframe in &timeframes {
             tracing::info!(symbol = %symbol, timeframe = %timeframe, "running pair");
-            if let Err(e) = run_one(&client, symbol, timeframe, &cfg, &local).await {
+            if let Err(e) = run_one(&client, symbol, timeframe, &cfg, &local, &data_dir).await {
                 tracing::error!(symbol = %symbol, timeframe = %timeframe, "failed: {e}");
                 errors.push(format!("{symbol}/{timeframe}: {e}"));
             }
@@ -74,15 +74,15 @@ pub async fn run(config_path: Option<&std::path::Path>) -> Result<(), AppError> 
     }
 }
 
-/// Download and convert one symbol/timeframe pair.
+/// Download one symbol/timeframe pair.
 async fn run_one(
     client: &reqwest::Client,
     symbol: &str,
     timeframe: &str,
     cfg: &AppConfig,
     local: &HashSet<String>,
+    data_dir: &Path,
 ) -> Result<(), AppError> {
-    let data_dir = PathBuf::from(&cfg.dir);
     let end = cfg
         .end
         .as_deref()
@@ -110,7 +110,7 @@ async fn run_one(
         "processing symbol-timeframe pair",
     );
 
-    let tasks = builder::build_download_tasks(symbol, timeframe, start, end, local, &data_dir);
+    let tasks = builder::build_download_tasks(symbol, timeframe, start, end, local, data_dir);
 
     if !tasks.is_empty() {
         tracing::debug!(

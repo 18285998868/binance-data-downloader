@@ -1,8 +1,8 @@
 use backoff::Error as BackoffError;
 use backoff::future::retry;
 
-use crate::cache;
 use crate::backoff::default_backoff;
+use crate::cache;
 
 const EXCHANGE_INFO_URL: &str = "https://fapi.binance.com/fapi/v1/exchangeInfo";
 

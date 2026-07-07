@@ -50,12 +50,11 @@ where
 
 /// Aggregate per-task results into a batch-level outcome.
 fn aggregate_results(results: Vec<Result<(), AppError>>) -> Result<(), AppError> {
-    let (ok, nf) = results.iter().fold((0, 0), |(ok, nf), r| match r {
-        Ok(_) => (ok + 1, nf),
-        Err(AppError::NotFound { .. }) => (ok, nf + 1),
-        _ => (ok, nf),
+    let (_ok, nf, fail) = results.iter().fold((0, 0, 0), |(ok, nf, fail), r| match r {
+        Ok(_) => (ok + 1, nf, fail),
+        Err(AppError::NotFound { .. }) => (ok, nf + 1, fail),
+        _ => (ok, nf, fail + 1),
     });
-    let fail = results.len() - ok - nf;
     if nf > 0 {
         tracing::debug!(
             not_found = nf,
