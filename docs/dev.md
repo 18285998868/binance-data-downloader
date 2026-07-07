@@ -9,7 +9,7 @@ for symbol 串行
     根据本地文件 ,过滤已经下载的urls
     http并发下载urls,流式写入zip,不再做数据处理
 ```toml
-symbol = ["BTCUSDT"] # 是否必须: 否,默认自动获取交易所全量TRADING
+# symbol = ["BTCUSDT"] # 是否必须: 否,默认自动获取交易所全量TRADING
 # timeframe = ["1d"]  # 可选,默认见上表
 # start = "2020-01-01" # 可选,默认从交易所获取首根K线
 # end = "2025-01-01"   # 可选,默认昨天

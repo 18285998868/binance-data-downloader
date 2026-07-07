@@ -23,13 +23,7 @@ pub async fn resolve_symbols(
         .ok_or_else(|| AppError::Data("missing symbols array".into()))?;
     Ok(symbols
         .iter()
-        .filter(|s| {
-            s["status"] == "TRADING"
-                && !s["symbol"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains('-')
-        })
+        .filter(|s| s["status"] == "TRADING" && !s["symbol"].as_str().unwrap_or("").contains('-'))
         .map(|s| s["symbol"].as_str().unwrap_or("").to_string())
         .collect())
 }
