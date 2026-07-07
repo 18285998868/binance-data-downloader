@@ -18,23 +18,22 @@ symbol = ["BTCUSDT"] # 是否必须: 否,默认自动获取交易所全量TRADIN
 
 ```
 src/
-  main.rs           # 只做入口
-  cli.rs            #  --config/-c
-  lib.rs            # 只做导出
-  error.rs          # 库:thiserror
-  app.rs            # 编排逻辑:
-                    # 加载配置->构建共享client->scan_local_files
-                    # if symbol=None,symbol=resolve_symbols()
-                    # 串行遍历 symbol → timeframe → run_one()
-                    # 构建开始时间resolve_start()
-                    # scan_local_files(已提升到runner,一次扫描传入)
-                    # build_download_tasks() (过滤local已有)
-                    # run_downloads()
-  config.rs         # 库:config-rs AppConfig 配置,AppConfig::load()
-  get_local_files.rs # 扫描本地文件 + 清理.tmp
-  get_symbols.rs    # exchange_info 全量缓存(redb),加载过滤
-  get_start_date.rs # 获取第一根k线时间
-  urls.rs           # 构建下载urls
-  builder.rs        # 构建tasks
-  download.rs
+  main.rs             # 入口
+  cli.rs              # --config/-c
+  lib.rs              # 模块导出
+  error.rs            # AppError (thiserror)
+  config.rs           # AppConfig, AppConfig::load()
+  app.rs              # 编排: 加载配置 → 构建 client → scan_local_files
+                      #       resolve_symbols → 串行 symbol → timeframe → run_one
+  cache.rs            # redb 本地缓存 (read/write, TTL)
+  backoff.rs          # default_backoff() ExponentialBackoff
+  exchange_info.rs    # Binance Futures exchangeInfo API + 缓存
+  get_local_files.rs  # scan_local_files: 扫描 .zip + 清理 .tmp
+  get_symbols.rs      # resolve_symbols: 自动获取全量 symbol (过滤含 `-` 的)
+  get_start_date.rs   # get_first_kline_date: API + 缓存
+  urls.rs             # build_urls: 生成下载 URL
+  builder.rs          # build_download_tasks: URL → 过滤 → DownloadTask
+  download/
+    mod.rs            # run_downloads + aggregate_results
+    stream.rs         # download_to_file: stream HTTP → .zip.tmp → rename .zip
 ```
