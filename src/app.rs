@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::AppError;
 use crate::builder;
@@ -18,7 +19,13 @@ use crate::get_symbols;
 pub async fn run(config_path: Option<&std::path::Path>) -> Result<(), AppError> {
     let cfg = AppConfig::load(config_path)?;
 
-    let client = common::http_client::build_client();
+    let client = reqwest::Client::builder()
+        .user_agent("binance-data-downloader/0.1")
+        .timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(256)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build()
+        .expect("build reqwest client");
 
     let data_dir = PathBuf::from(&cfg.dir);
     let local = scan_local_files(&data_dir).await?;

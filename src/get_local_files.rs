@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::AppError;
 
-/// Scan data_dir for existing .zip/.parquet files, normalizing .parquet to .zip keys.
+/// Scan data_dir for existing .zip files.
 /// Also removes stale .tmp files during the same walk.
 pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, AppError> {
     let dir = data_dir.to_path_buf();
@@ -29,23 +29,14 @@ pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, AppErr
                 continue;
             }
 
-            if s.ends_with(".zip") || s.ends_with(".parquet") {
-                files.insert(normalize_to_zip(&s));
+            if s.ends_with(".zip") {
+                files.insert(s.into_owned());
             }
         }
         Ok::<_, AppError>(files)
     })
     .await
     .map_err(AppError::from)?
-}
-
-/// Normalize a .parquet key to .zip for dedup lookup.
-fn normalize_to_zip(p: &str) -> String {
-    if let Some(base) = p.strip_suffix(".parquet") {
-        format!("{base}.zip")
-    } else {
-        p.to_string()
-    }
 }
 
 #[cfg(test)]
@@ -67,16 +58,6 @@ mod tests {
         std::fs::write(data.join("BTCUSDT-1m-2024-01-01.zip"), b"zip").unwrap();
         let files = scan_local_files(dir.path()).await.unwrap();
         assert_eq!(files.len(), 1);
-        assert!(files.contains("futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip"));
-    }
-
-    #[tokio::test]
-    async fn scan_normalizes_parquet_to_zip() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("futures/um/daily/klines/BTCUSDT/1m");
-        std::fs::create_dir_all(&data).unwrap();
-        std::fs::write(data.join("BTCUSDT-1m-2024-01-01.parquet"), b"parquet").unwrap();
-        let files = scan_local_files(dir.path()).await.unwrap();
         assert!(files.contains("futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip"));
     }
 

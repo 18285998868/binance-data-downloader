@@ -21,14 +21,8 @@ pub enum AppError {
     #[error("Data error: {0}")]
     Data(String),
 
-    #[error("Parse error: {0}")]
-    Parse(String),
-
     #[error("Date error: {0}")]
     Date(String),
-
-    #[error("UTF-8 error: {0}")]
-    Utf8(#[from] std::str::Utf8Error),
 
     #[error("Download failed for {url}: {reason}")]
     DownloadFailed { url: String, reason: String },

@@ -1,10 +1,11 @@
 use crate::AppError;
+use crate::exchange_info;
 
 /// Resolve the list of symbols to download.
 ///
 /// If `configured` is non-empty, return it as-is.
-/// Otherwise fetch all TRADING symbols from Binance Futures exchangeInfo
-/// (cached by `common::cache`).
+/// Otherwise fetch all TRADING symbols from Binance Futures exchangeInfo,
+/// filtering out symbols containing `-`.
 pub async fn resolve_symbols(
     client: &reqwest::Client,
     configured: &[String],
@@ -12,7 +13,7 @@ pub async fn resolve_symbols(
     if !configured.is_empty() {
         return Ok(configured.to_vec());
     }
-    let raw = common::exchange_info::get_exchange_info(client)
+    let raw = exchange_info::get_exchange_info(client)
         .await
         .map_err(|e| AppError::Data(e.to_string()))?;
     let info: serde_json::Value = serde_json::from_slice(&raw)
@@ -22,7 +23,13 @@ pub async fn resolve_symbols(
         .ok_or_else(|| AppError::Data("missing symbols array".into()))?;
     Ok(symbols
         .iter()
-        .filter(|s| s["status"] == "TRADING")
+        .filter(|s| {
+            s["status"] == "TRADING"
+                && !s["symbol"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains('-')
+        })
         .map(|s| s["symbol"].as_str().unwrap_or("").to_string())
         .collect())
 }
