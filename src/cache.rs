@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::{LazyLock, Mutex};
 
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableDatabase, TableDefinition};
 
 const TABLE: TableDefinition<&str, Vec<u8>> = TableDefinition::new("data");
 
