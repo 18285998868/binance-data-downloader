@@ -34,7 +34,7 @@ resolve_start(...)          # 解析实际起始日期;解析失败则该配对�
 if start > end → 跳过该配对
 tasks = build_download_tasks(symbol, tf, start, end, local, output_dir)
 if tasks 非空:
-    stats = download::run_downloads(client, tasks, cfg.concurrency)
+    stats = run_downloads::run_downloads(client, tasks, cfg.concurrency)
     # 有界并发 + 增量统计
 else:
     # 无待下载文件(全部已缓存或范围为空)
@@ -52,8 +52,10 @@ sym_start = get_first_kline_date(symbol, tf)   # 交易所首根 K 线日期(带
 
 ## 任务构建 `build_download_tasks`
 
+```
+
 ```text
-urls::build_urls(symbol, tf, start, end)   # 逐日生成 DownloadUrl
+build_urls(symbol, tf, start, end)   # 逐日生成 DownloadUrl
     ├─ rel_path = futures/um/daily/klines/{pair}/{tf}/{pair}-{tf}-{date}.zip
     └─ url      = https://data.binance.vision/data/{rel_path}
 then:
@@ -63,7 +65,7 @@ then:
 
 每对任务量为日期跨度(天)数,O(日数) 内存,可接受。
 
-## 有界并发下载 `download::run_downloads`
+## 有界并发下载 `run_downloads::run_downloads`
 
 ```text
 run_downloads_inner(client, tasks, concurrency, download_fn)
@@ -77,7 +79,7 @@ run_downloads_inner(client, tasks, concurrency, download_fn)
 - **404 不视为失败**:计入 `not_found`(预期出现在首/尾边界日期)。
 - 失败明细日志最多打印 20 条,超出部分汇总计数。
 
-## 单文件下载 `download_to_file(download/stream.rs)`
+## 单文件下载 `download_to_file(steps/06_run_downloads/stream.rs)`
 
 ```text
 GET url ──> 2xx? ──> 写入 <dest>.zip.tmp(流式逐 chunk) ──> flush ──> rename → <dest>.zip
@@ -120,18 +122,24 @@ GET url ──> 2xx? ──> 写入 <dest>.zip.tmp(流式逐 chunk) ──> flus
 
 ## 模块职责速查
 
+源码按流水线步骤归档于 `src/steps/NN_动词_名词.rs`,磁盘名带数字前缀,`lib.rs` 用
+`#[path]` 将模块名映射为可读的步骤名(`cli`/`config`/`scan_local_files`/`get_start_date`/
+`build_download_tasks`/`run_downloads`/`app`),对外 API(`bdd::cli`、`bdd::app`)不变。
+
 ```text
-main.rs            入口, anyhow context
-cli.rs             clap: --config/-c (必填)
-config.rs          AppConfig 加载 + validate
-app.rs             编排: 配置 → client → 扫描 → 串行配对 → run_one; 批统计
-builder.rs         build_urls 结果 → 过滤本地已有 → DownloadTask
-urls.rs            逐日生成下载 URL + 相对路径
-get_start_date.rs  交易所首根 K 线日期(API + redb 缓存)
-get_local_files.rs 扫描已有 .zip + 清理 .tmp
-download/mod.rs    buffer_unordered 有界并发 + 增量统计 + 进度/失败上限
-download/stream.rs 单文件流式下载: .tmp 原子写 + 重试退避
-cache.rs           redb 通用缓存(read/write/TTL)
-backoff.rs         默认指数退避(max 30s)
-error.rs           AppError(thiserror)
+src/main.rs                     入口, anyhow context
+src/lib.rs                      #[path] 模块声明 + DownloadTask 定义 + re-export
+src/error.rs                    支撑: AppError(thiserror)
+src/cache.rs                    支撑: redb 通用缓存(read/write/TTL)
+src/backoff.rs                  支撑: 默认指数退避(max 30s)
+
+steps/01_cli.rs                 cli:  clap: --config/-c (必填)
+steps/02_config.rs              config: AppConfig 加载 + validate
+steps/03_scan_local_files.rs    scan_local_files: 扫描已有 .zip + 清理 .tmp
+steps/04_get_start_date.rs      get_start_date: 交易所首根 K 线日期(API + redb 缓存)
+steps/05_build_download_tasks.rs build_download_tasks: 逐日生成 URL → 过滤本地已有 → DownloadTask
+steps/06_run_downloads/mod.rs   run_downloads: buffer_unordered 有界并发 + 增量统计 + 进度/失败上限
+steps/06_run_downloads/stream.rs run_downloads: 单文件流式下载: .tmp 原子写 + 重试退避
+steps/07_app.rs                 app: 编排(配置 → client → 扫描 → 串行配对 → run_one)
+                                        + resolve_start + 批统计
 ```

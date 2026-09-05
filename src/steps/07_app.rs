@@ -3,11 +3,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::AppError;
-use crate::builder;
+use crate::build_download_tasks;
 use crate::config::AppConfig;
-use crate::download;
-use crate::get_local_files::scan_local_files;
 use crate::get_start_date;
+use crate::run_downloads;
+use crate::scan_local_files::scan_local_files;
 
 /// Run the full batch download pipeline.
 ///
@@ -111,8 +111,14 @@ async fn run_one(
         "processing symbol-timeframe pair",
     );
 
-    let tasks =
-        builder::build_download_tasks(symbol, timeframe, start, end, local, &cfg.output_dir);
+    let tasks = build_download_tasks::build_download_tasks(
+        symbol,
+        timeframe,
+        start,
+        end,
+        local,
+        &cfg.output_dir,
+    );
 
     if !tasks.is_empty() {
         tracing::debug!(
@@ -121,7 +127,7 @@ async fn run_one(
             end = %end,
             "downloading all",
         );
-        let stats = download::run_downloads(client, tasks, cfg.concurrency).await?;
+        let stats = run_downloads::run_downloads(client, tasks, cfg.concurrency).await?;
         tracing::info!(
             symbol = %symbol,
             timeframe = %timeframe,

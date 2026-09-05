@@ -1,89 +1,66 @@
 # binance-data-downloader
 
-从 Binance Public Data 下载历史 K 线数据，解压 CSV 并转换为 Parquet 格式。
+从 Binance Public Data 下载 USDT-M 永续合约日度 K 线归档(zip),流式写入本地,按
+`symbol × timeframe × 日期` 一个文件一个 zip。
 
 ## 文件结构
 
 ```
 config/
-  config.toml              # 批量下载配置
+  config.toml              # 实际运行配置(gitignore, 不提交)
+  config.example.toml      # 配置模板(字段说明)
+data/                      # 下载产物: futures/um/daily/klines/{symbol}/{tf}/{symbol}-{tf}-{date}.zip (gitignore)
+LOGIC.md                   # 处理流程与技术细节
+docs/dev.md                # 历史开发笔记
 src/
-  main.rs                  # 入口: 初始化 tracing → run()
-  lib.rs                   # 模块导出 + re-export run()
-  error.rs                 # AppError 定义 (thiserror)
-  config.rs                # AppConfig (config crate)
-  runner.rs                # run(): 加载配置, 串行遍历 symbol → timeframe
-  run_one.rs               # run_one(): 单对下载编排 (resolve_start → scan → build → download)
-  task/
-    mod.rs                 # DownloadTask 结构体
-    builder.rs             # build_download_tasks(): URL → 过滤本地已有 → DownloadTask
-    urls.rs                # build_urls(): 按日期生成 Binance 下载 URL
-    get_local_files.rs     # scan_local_files(): 扫描 data_dir 已有 zip/parquet
-    get_start.rs           # get_first_kline_date(): 交易所首根 K 线日期 (redb 缓存)
-    get_symbols.rs         # resolve_symbols(): 配置列表 or 从 exchangeInfo 拉取
-    download/
-      mod.rs               # run_downloads(): 并发下载 + 聚合结果; csv_to_dataframe_sync()
-      download_bytes.rs    # download_bytes_with_retry(): HTTP GET + backoff 重试
-      extract_zip.rs       # extract_csv_from_bytes(): 从 zip 提取 csv
-      csv_table_title.rs   # detect_header() / default_header(): 表头检测与生成
-      csv_set_col_types.rs # convert_types(): open_time/close_time/count → Int64, 其余 → Float64
-      df_to_parquet.rs     # write_parquet_sync(): 原子写入 (tmp → rename)
-
+  main.rs                  # 入口: tracing → bdd::cli::parse → bdd::app::run
+  lib.rs                   # #[path] 模块声明 + DownloadTask 定义
+  error.rs                 # 支撑: AppError (thiserror)
+  cache.rs                 # 支撑: redb 缓存 (read/write/TTL)
+  backoff.rs               # 支撑: 默认指数退避 (max 30s)
+  steps/                   # 按流水线步骤归档 (磁盘文件名带数字前缀, 模块名 = 可读步骤名)
+    01_cli.rs                  cli:  解析 --config/-c
+    02_config.rs               config: 加载/校验 TOML 配置
+    03_scan_local_files.rs     scan_local_files: 扫描本地 .zip + 清理 .tmp
+    04_get_start_date.rs       get_start_date: 交易所首根 K 线日期 (API + redb 缓存)
+    05_build_download_tasks.rs build_download_tasks: 生成 URL → 过滤已下载 → DownloadTask
+    06_run_downloads/
+      mod.rs                   run_downloads: buffer_unordered 有界并发 + 增量统计
+      stream.rs                run_downloads: 单文件流式下载 .tmp → rename 原子写
+    07_app.rs                  app: 顶层编排 (run + run_one + resolve_start + 批统计)
 ```
 
 ## 配置
 
-```toml
-# config/config.toml
-# symbol = ["BTCUSDT"]    # 可选, 默认: 从交易所自动获取全量 TRADING 符号
-# timeframe = ["1d"]      # 可选, 默认: 全部 12 个周期
-# start = "2020-01-01"    # 可选, 默认: 交易所首根 K 线日期
-# end = "2025-01-01"      # 可选, 默认: 昨天
-# dir = "data"            # 可选, 默认: data
+`config/config.toml`(示例见 `config/config.example.toml`):
 
+```toml
+symbol = ["BTCUSDT"]       # 必填, 至少一个交易对
+timeframe = ["1d"]         # 必填, 至少一个周期
+# start = "2020-01-01"     # 可选, 省略则取交易所首根 K 线日期(不会早于首根)
+# end   = "2025-01-01"     # 可选, 省略则取昨天
+output_dir = "data"        # 可选, 输出目录, 默认 "data"
+concurrency = 16           # 可选, 配对内最大并发下载数, 默认 16
 ```
+
+未知字段、空 `symbol`/`timeframe`、`concurrency = 0`、非法日期都会在启动时报错退出。
 
 ## 用法
 
 ```bash
-cargo run -p binance-data-downloader --release
-cargo build -p binance-data-downloader --release
-target/release/binance-data-downloader --config creats/binance-data-downloader/config/config.toml
+cargo run --release -- -c config/config.toml
+# 或直接运行二进制:
+target/release/binance-data-downloader -c config/config.toml
 ```
+
+并发模型:配对(层)串行,配对内 `buffer_unordered(concurrency)` 有界并发;增量统计,
+每完成 100 个文件打一条进度;文件级失败不中断同批其余任务,404 计为 `not_found` 不计失败。
 
 ## 测试
 
 ```bash
-# 单元测试 + mock 测试
-cargo test -p binance-data-downloader
-
-# 含网络测试
-cargo test -p binance-data-downloader -- --include-ignored
+cargo test
 ```
 
-## 执行流程
-
-```
-run()
-  ├─ 加载 config.toml
-  ├─ 构建 HTTP client
-  ├─ 扫描本地已有 zip/parquet (一次, 然后跳过已下载)
-  ├─ 解析 symbol / timeframe
-  │
-  └─ for each symbol (串行)
-       └─ for each timeframe (串行)
-            └─ run_one()
-                 ├─ resolve_start(): 交易所首根日期 (redb 缓存)
-                 ├─ build_download_tasks(): 按天生成 URL → 跳过已存在
-                 │
-                 └─ run_downloads()  (文件级别并发)
-                 └─ download_bytes_with_retry()  (backoff 重试)
-                      ├─ 404 → Permanent (不重试)
-                      ├─ 5xx/网络错误 → Transient (重试)
-                      └─ 空 body → Permanent (不重试)
-                 └─ process_zip()  (spawn_blocking)
-                      ├─ extract_csv_from_bytes()
-                      ├─ csv_to_dataframe_sync()  (自动检测表头)
-                      ├─ convert_types()  (Int64 / Float64)
-                      └─ write_parquet_sync()  (tmp → rename 原子写)
-```
+单元测试 + mock 测试覆盖配置校验、URL 生成、任务构建、并发调度、单文件下载(404/5xx)、
+本地扫描、缓存、退避等。
