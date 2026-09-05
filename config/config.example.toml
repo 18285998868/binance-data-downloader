@@ -1,5 +1,22 @@
-# symbol = ["BTCUSDT"]    # 是否必须: 否, 默认值: None(自动获取交易所全量TRADING), 可选参数: ["BTCUSDT","ETHUSDT",...]
-# timeframe = ["1d"]      # 是否必须: 否, 默认值: ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d"], 可选参数: ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","1w","1M"]
-# start = "2020-01-01"    # 是否必须: 否, 默认值: 交易所首根K线时间, 可选参数: YYYY-MM-DD
-# end = "2025-01-01"      # 是否必须: 否, 默认值: 昨天, 可选参数: YYYY-MM-DD
-# dir = "data"            # 是否必须: 否, 默认值: "data"
+# 配置说明(全部字段以小写字母开头)
+# 必填字段: symbol, timeframe (缺失或为空数组会报错退出)
+
+# symbol: 下载的交易对列表, 至少一个
+# 可选参数: ["BTCUSDT", "ETHUSDT", ...]
+symbol = ["BTCUSDT"]
+
+# timeframe: K线周期, 必须显式列出需要的全部周期
+# 可选参数: ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","1w","1M"]
+timeframe = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
+
+# start: 可选, YYYY-MM-DD, 省略则取交易所首根K线时间(并自动钳制,不会早于首根K线)
+# end:   可选, YYYY-MM-DD, 省略则取昨天
+# 若 start > end, 该配对会跳过下载
+# start = "2020-01-01"
+# end   = "2025-01-01"
+
+# output_dir: 可选, K线文件输出目录, 默认 "data"
+# output_dir = "data"
+
+# concurrency: 可选, 每个 (symbol × timeframe) 配对内的最大并发下载数, 默认 16
+# concurrency = 16

@@ -11,10 +11,8 @@ pub mod cli;
 pub mod config;
 pub mod download;
 pub mod error;
-pub mod exchange_info;
 pub mod get_local_files;
 pub mod get_start_date;
-pub mod get_symbols;
 pub mod urls;
 
 use std::path::PathBuf;

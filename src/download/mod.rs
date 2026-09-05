@@ -4,79 +4,124 @@ use std::future::Future;
 
 use crate::AppError;
 use crate::DownloadTask;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::{StreamExt, iter as stream_iter};
 use tracing::Instrument;
 
-/// Download all tasks in parallel with no concurrency limit.
+/// How often a line of progress is logged, in completed files.
+const PROGRESS_EVERY: usize = 100;
+/// Maximum number of individual failure details logged per batch.
+const MAX_LOGGED_FAILURES: usize = 20;
+
+/// Aggregate statistics for a completed batch of downloads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DownloadStats {
+    pub total: usize,
+    pub ok: usize,
+    pub not_found: usize,
+    pub failed: usize,
+}
+
+impl DownloadStats {
+    fn done(&self) -> usize {
+        self.ok + self.not_found + self.failed
+    }
+}
+
+/// Download all tasks with bounded concurrency.
 pub async fn run_downloads(
     client: &reqwest::Client,
     tasks: Vec<DownloadTask>,
-) -> Result<(), AppError> {
+    concurrency: usize,
+) -> Result<DownloadStats, AppError> {
     let download_fn = move |c: reqwest::Client, t: DownloadTask| async move {
         stream::download_to_file(&c, &t).await
     };
-    run_downloads_inner(client, tasks, download_fn).await
+    run_downloads_inner(client, tasks, concurrency, download_fn).await
 }
 
 /// Core download orchestration, parameterized by the download function for testing.
+///
+/// Streams tasks through `buffer_unordered(concurrency)`, so at most
+/// `concurrency` downloads run at once and results are counted incrementally
+/// instead of materializing all futures upfront.
 async fn run_downloads_inner<F, Fut>(
     client: &reqwest::Client,
     tasks: Vec<DownloadTask>,
+    concurrency: usize,
     download_fn: F,
-) -> Result<(), AppError>
+) -> Result<DownloadStats, AppError>
 where
     F: Fn(reqwest::Client, DownloadTask) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), AppError>> + Send,
 {
     let total = tasks.len();
+    let concurrency = concurrency.max(1);
     if total == 0 {
-        return Ok(());
+        return Ok(DownloadStats::default());
     }
-    tracing::debug!(total = total, "downloading new files");
-    let results: Vec<_> = tasks
-        .into_iter()
+    tracing::debug!(total, concurrency, "downloading files");
+
+    let mut stats = DownloadStats {
+        total,
+        ..DownloadStats::default()
+    };
+    let mut logged_failures = 0;
+
+    let mut stream = stream_iter(tasks)
         .map(|t| {
             let c = client.clone();
             let span = tracing::info_span!("download", pair = %t.pair, tf = %t.timeframe);
             let fut = download_fn(c, t);
             fut.instrument(span)
         })
-        .collect::<FuturesUnordered<_>>()
-        .collect()
-        .await;
+        .buffer_unordered(concurrency);
 
-    aggregate_results(results)
-}
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(()) => stats.ok += 1,
+            Err(AppError::NotFound { .. }) => stats.not_found += 1,
+            Err(e) => {
+                stats.failed += 1;
+                if logged_failures < MAX_LOGGED_FAILURES {
+                    logged_failures += 1;
+                    tracing::warn!("download failed: {e}");
+                }
+            }
+        }
 
-/// Aggregate per-task results into a batch-level outcome.
-fn aggregate_results(results: Vec<Result<(), AppError>>) -> Result<(), AppError> {
-    let (_ok, nf, fail) = results.iter().fold((0, 0, 0), |(ok, nf, fail), r| match r {
-        Ok(_) => (ok + 1, nf, fail),
-        Err(AppError::NotFound { .. }) => (ok, nf + 1, fail),
-        _ => (ok, nf, fail + 1),
-    });
-    if nf > 0 {
+        if stats.done().is_multiple_of(PROGRESS_EVERY) {
+            tracing::info!(
+                done = stats.done(),
+                total = stats.total,
+                ok = stats.ok,
+                not_found = stats.not_found,
+                failed = stats.failed,
+                "download progress",
+            );
+        }
+    }
+
+    if stats.not_found > 0 {
         tracing::debug!(
-            not_found = nf,
-            total = results.len(),
+            not_found = stats.not_found,
+            total = stats.total,
             "files not found on server (404, expected for edge dates)",
         );
     }
+    if stats.failed > logged_failures {
+        tracing::warn!(
+            hidden = stats.failed - logged_failures,
+            "additional failure details not logged",
+        );
+    }
 
-    if fail > 0 {
-        for r in &results {
-            if let Err(e) = r
-                && !matches!(e, AppError::NotFound { .. })
-            {
-                tracing::warn!("download failed: {e}");
-            }
-        }
+    if stats.failed > 0 {
         return Err(AppError::DownloadFailed {
             url: "batch".into(),
-            reason: format!("{fail}/{} failed", results.len()),
+            reason: format!("{}/{} failed", stats.failed, stats.total),
         });
     }
-    Ok(())
+    Ok(stats)
 }
 
 #[cfg(test)]
@@ -85,63 +130,7 @@ mod tests {
     use crate::AppError;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    // — aggregate_results —
-
-    #[test]
-    fn aggregate_all_ok() {
-        let results = vec![Ok(()), Ok(()), Ok(())];
-        assert!(aggregate_results(results).is_ok());
-    }
-
-    #[test]
-    fn aggregate_not_found_only_ok() {
-        let results = vec![
-            Ok(()),
-            Err(AppError::NotFound {
-                url: "http://x".into(),
-            }),
-            Err(AppError::NotFound {
-                url: "http://y".into(),
-            }),
-        ];
-        assert!(aggregate_results(results).is_ok());
-    }
-
-    #[test]
-    fn aggregate_one_fail_returns_err() {
-        let results = vec![
-            Ok(()),
-            Err(AppError::DownloadFailed {
-                url: "a".into(),
-                reason: "boom".into(),
-            }),
-        ];
-        let err = aggregate_results(results).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("1/2 failed"));
-    }
-
-    #[test]
-    fn aggregate_mix_not_found_and_fail() {
-        let results = vec![
-            Ok(()),
-            Err(AppError::NotFound {
-                url: "http://x".into(),
-            }),
-            Err(AppError::DownloadFailed {
-                url: "b".into(),
-                reason: "timeout".into(),
-            }),
-        ];
-        let err = aggregate_results(results).unwrap_err();
-        assert!(err.to_string().contains("1/3 failed"));
-    }
-
-    #[test]
-    fn aggregate_empty_vec_ok() {
-        assert!(aggregate_results(vec![]).is_ok());
-    }
+    use std::time::Duration;
 
     // — run_downloads_inner —
 
@@ -150,11 +139,11 @@ mod tests {
         let client = reqwest::Client::new();
         let tasks = vec![];
         let download_fn = |_: reqwest::Client, _: DownloadTask| async { unreachable!() };
-        assert!(
-            run_downloads_inner(&client, tasks, download_fn)
-                .await
-                .is_ok()
-        );
+        let stats = run_downloads_inner(&client, tasks, 16, download_fn)
+            .await
+            .unwrap();
+        assert_eq!(stats.total, 0);
+        assert_eq!(stats.ok, 0);
     }
 
     #[tokio::test]
@@ -170,12 +159,13 @@ mod tests {
                 Ok(())
             }
         };
-        assert!(
-            run_downloads_inner(&client, tasks, download_fn)
-                .await
-                .is_ok()
-        );
+        let stats = run_downloads_inner(&client, tasks, 16, download_fn)
+            .await
+            .unwrap();
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
+        assert_eq!(stats.ok, 2);
+        assert_eq!(stats.not_found, 0);
+        assert_eq!(stats.failed, 0);
     }
 
     #[tokio::test]
@@ -191,11 +181,34 @@ mod tests {
                 Ok(())
             }
         };
-        assert!(
-            run_downloads_inner(&client, tasks, download_fn)
-                .await
-                .is_ok()
-        );
+        let stats = run_downloads_inner(&client, tasks, 16, download_fn)
+            .await
+            .unwrap();
+        assert_eq!(stats.ok, 1);
+        assert_eq!(stats.not_found, 1);
+        assert_eq!(stats.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn run_downloads_not_found_not_counted_as_failure() {
+        let client = reqwest::Client::new();
+        let tasks = vec![dummy_task("a"), dummy_task("b"), dummy_task("c")];
+        let download_fn = |_: reqwest::Client, t: DownloadTask| async move {
+            match t.pair.as_str() {
+                "a" => Err(AppError::NotFound {
+                    url: "http://x".into(),
+                }),
+                "b" => Err(AppError::DownloadFailed {
+                    url: "x".into(),
+                    reason: "bad".into(),
+                }),
+                _ => Ok(()),
+            }
+        };
+        let err = run_downloads_inner(&client, tasks, 16, download_fn)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("1/3 failed"));
     }
 
     #[tokio::test]
@@ -212,10 +225,38 @@ mod tests {
                 Ok(())
             }
         };
-        let err = run_downloads_inner(&client, tasks, download_fn)
+        let err = run_downloads_inner(&client, tasks, 16, download_fn)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("1/2 failed"));
+    }
+
+    #[tokio::test]
+    async fn concurrency_one_runs_sequentially() {
+        let client = reqwest::Client::new();
+        let tasks: Vec<_> = (0..5).map(|i| dummy_task(&format!("s{i}"))).collect();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let stats = {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            let download_fn = move |_: reqwest::Client, _: DownloadTask| {
+                let active = active.clone();
+                let max_active = max_active.clone();
+                async move {
+                    let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(cur, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            };
+            run_downloads_inner(&client, tasks, 1, download_fn)
+                .await
+                .unwrap()
+        };
+        assert_eq!(stats.ok, 5);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
     }
 
     // — helpers —

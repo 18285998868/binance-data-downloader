@@ -1,66 +1,54 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use config::Config;
 use serde::Deserialize;
 
 use crate::AppError;
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
-    pub symbol: Option<Vec<String>>,
-    pub timeframe: Option<Vec<String>>,
-    pub start: Option<String>,
-    pub end: Option<String>,
-    pub dir: String,
+    pub symbol: Vec<String>,
+    pub timeframe: Vec<String>,
+    pub start: Option<chrono::NaiveDate>,
+    pub end: Option<chrono::NaiveDate>,
+    #[serde(default = "default_output_dir")]
+    pub output_dir: PathBuf,
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            symbol: None,
-            timeframe: Some(vec![
-                "1m".into(),
-                "3m".into(),
-                "5m".into(),
-                "15m".into(),
-                "30m".into(),
-                "1h".into(),
-                "2h".into(),
-                "4h".into(),
-                "6h".into(),
-                "8h".into(),
-                "12h".into(),
-                "1d".into(),
-            ]),
-            start: None,
-            end: None,
-            dir: "data".into(),
-        }
-    }
+fn default_output_dir() -> PathBuf {
+    PathBuf::from("data")
+}
+
+fn default_concurrency() -> usize {
+    16
 }
 
 impl AppConfig {
-    pub fn load(path: Option<&Path>) -> Result<Self, AppError> {
-        let p = match path {
-            Some(p) => p.to_path_buf(),
-            None => {
-                let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml");
-                if dev.exists() {
-                    dev
-                } else {
-                    let exe =
-                        std::env::current_exe().map_err(|e| AppError::Config(e.to_string()))?;
-                    exe.parent().unwrap_or(&exe).join("config/config.toml")
-                }
-            }
-        };
-        Config::builder()
-            .add_source(config::File::from(p.as_path()))
-            .build()
-            .map_err(|e| AppError::Config(e.to_string()))?
-            .try_deserialize()
-            .map_err(|e| AppError::Config(e.to_string()))
+    pub fn load(path: &Path) -> Result<Self, AppError> {
+        let raw = std::fs::read_to_string(path).map_err(|e| AppError::Config(e.to_string()))?;
+        let cfg: Self = toml::from_str(&raw).map_err(|e| AppError::Config(e.to_string()))?;
+        cfg.validate()
+    }
+
+    fn validate(self) -> Result<Self, AppError> {
+        if self.symbol.is_empty() {
+            return Err(AppError::Config(
+                "symbol must contain at least one symbol".into(),
+            ));
+        }
+        if self.timeframe.is_empty() {
+            return Err(AppError::Config(
+                "timeframe must list at least one timeframe".into(),
+            ));
+        }
+        if self.concurrency == 0 {
+            return Err(AppError::Config(
+                "concurrency must be greater than zero".into(),
+            ));
+        }
+        Ok(self)
     }
 }
 
@@ -69,38 +57,105 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    #[test]
-    fn load_default_path() {
-        let cfg = AppConfig::load(None).unwrap();
-        assert_eq!(cfg.symbol, None);
-        assert_eq!(cfg.dir, "data");
-    }
-
-    #[test]
-    fn load_custom_file() {
+    fn write_config(contents: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.toml");
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "symbol = [\"BTCUSDT\"]").unwrap();
-        writeln!(f, "dir = \"/tmp/data\"").unwrap();
+        writeln!(f, "{contents}").unwrap();
         drop(f);
+        (dir, path)
+    }
 
-        let cfg = AppConfig::load(Some(&path)).unwrap();
-        assert_eq!(cfg.symbol, Some(vec!["BTCUSDT".into()]));
-        assert_eq!(cfg.dir, "/tmp/data");
+    fn load(contents: &str) -> Result<AppConfig, AppError> {
+        let (_dir, path) = write_config(contents);
+        AppConfig::load(&path)
     }
 
     #[test]
-    fn load_invalid_path() {
-        let r = AppConfig::load(Some(Path::new("/nonexistent/config.toml")));
-        assert!(r.is_err());
+    fn load_full_config() {
+        let cfg = load(
+            "symbol = [\"BTCUSDT\", \"ETHUSDT\"]\n\
+             timeframe = [\"1m\", \"1d\"]\n\
+             start = \"2024-01-01\"\n\
+             end = \"2025-01-01\"\n\
+             output_dir = \"/tmp/data\"",
+        )
+        .unwrap();
+        assert_eq!(cfg.symbol, vec!["BTCUSDT", "ETHUSDT"]);
+        assert_eq!(cfg.timeframe, vec!["1m", "1d"]);
+        assert_eq!(
+            cfg.start,
+            Some(chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
+        );
+        assert_eq!(
+            cfg.end,
+            Some(chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())
+        );
+        assert_eq!(cfg.output_dir, PathBuf::from("/tmp/data"));
+        assert_eq!(cfg.concurrency, 16);
     }
 
     #[test]
-    fn app_config_default() {
-        let cfg = AppConfig::default();
-        assert!(cfg.symbol.is_none());
-        assert!(cfg.timeframe.is_some());
-        assert!(cfg.start.is_none());
+    fn load_minimal_config() {
+        let cfg = load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]").unwrap();
+        assert_eq!(cfg.symbol, vec!["BTCUSDT"]);
+        assert_eq!(cfg.timeframe, vec!["1m"]);
+        assert_eq!(cfg.start, None);
+        assert_eq!(cfg.end, None);
+        assert_eq!(cfg.output_dir, PathBuf::from("data"));
+    }
+
+    #[test]
+    fn load_with_concurrency_override() {
+        let cfg = load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\nconcurrency = 8").unwrap();
+        assert_eq!(cfg.concurrency, 8);
+    }
+
+    #[test]
+    fn zero_concurrency_fails() {
+        let err =
+            load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\nconcurrency = 0").unwrap_err();
+        assert!(err.to_string().contains("concurrency"));
+    }
+
+    #[test]
+    fn missing_symbol_fails() {
+        let err = load("timeframe = [\"1m\"]").unwrap_err();
+        assert!(err.to_string().contains("symbol"));
+    }
+
+    #[test]
+    fn empty_symbol_fails() {
+        let err = load("symbol = []\ntimeframe = [\"1m\"]").unwrap_err();
+        assert!(err.to_string().contains("symbol"));
+    }
+
+    #[test]
+    fn missing_timeframe_fails() {
+        let err = load("symbol = [\"BTCUSDT\"]").unwrap_err();
+        assert!(err.to_string().contains("timeframe"));
+    }
+
+    #[test]
+    fn empty_timeframe_fails() {
+        let err = load("symbol = [\"BTCUSDT\"]\ntimeframe = []").unwrap_err();
+        assert!(err.to_string().contains("timeframe"));
+    }
+
+    #[test]
+    fn invalid_date_fails() {
+        assert!(
+            load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\nstart = \"not-a-date\"").is_err()
+        );
+    }
+
+    #[test]
+    fn unknown_field_fails() {
+        assert!(load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\ntomeframe = \"1m\"").is_err());
+    }
+
+    #[test]
+    fn nonexistent_path_fails() {
+        assert!(AppConfig::load(Path::new("/nonexistent/config.toml")).is_err());
     }
 }
