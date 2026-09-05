@@ -8,11 +8,18 @@ use crate::AppError;
 pub async fn scan_local_files(data_dir: &Path) -> Result<HashSet<String>, AppError> {
     let dir = data_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
+        if !dir.exists() {
+            return Ok(HashSet::new());
+        }
         let mut files = HashSet::new();
-        for e in walkdir::WalkDir::new(&dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        for e in walkdir::WalkDir::new(&dir) {
+            let e = match e {
+                Ok(e) => e,
+                Err(err) => {
+                    tracing::warn!(path = %dir.display(), "walkdir entry failed: {err}");
+                    continue;
+                }
+            };
             if !e.file_type().is_file() {
                 continue;
             }
@@ -47,6 +54,14 @@ mod tests {
     async fn scan_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
         let files = scan_local_files(dir.path()).await.unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_missing_dir_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let files = scan_local_files(&missing).await.unwrap();
         assert!(files.is_empty());
     }
 

@@ -90,6 +90,19 @@ async fn run_one(
     cfg: &AppConfig,
     local: &HashSet<String>,
 ) -> Result<(), AppError> {
+    if let Some(cfg_start) = start
+        && cfg_start > end
+    {
+        tracing::warn!(
+            symbol = %symbol,
+            timeframe = %timeframe,
+            start = %cfg_start,
+            end = %end,
+            "config start after end date, skipping",
+        );
+        return Ok(());
+    }
+
     let start = resolve_start(client, symbol, timeframe, start).await?;
 
     if start > end {

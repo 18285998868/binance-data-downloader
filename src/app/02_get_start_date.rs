@@ -55,6 +55,21 @@ async fn fetch_first_kline(
                     });
                 }
             };
+            let status = r.status();
+            if !status.is_success() {
+                return if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error()
+                {
+                    Err(BackoffError::Transient {
+                        err: AppError::Api(format!("HTTP {status} for {u}")),
+                        retry_after: None,
+                    })
+                } else {
+                    Err(BackoffError::Permanent(AppError::Api(format!(
+                        "HTTP {status} for {u}"
+                    ))))
+                };
+            }
             let t = match r.text().await {
                 Ok(t) => t,
                 Err(e) => {

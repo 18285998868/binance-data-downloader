@@ -56,15 +56,15 @@ app/mod.rs                     # 整体编排 run(config_path) (伪代码):
                                #   4 end = config.end 或 Local::now() - 1天
                                #   5 for symbol in symbols                    # 品种层(串行)
                                #   6   for timeframe in timeframes           # 时间帧层(串行)
-                               #   7     run_one: resolve_start = max(start, get_first_kline_date)  # redb 缓存 → klines?limit=1&startTime=0
-                               #   8       start > end → warn 跳过
+                               #   7     run_one: cfg.start > end → 直接跳过(不请求首根); 否则 resolve_start = max(start, get_first_kline_date)  # redb 缓存 → klines?limit=1&startTime=0
+                               #   8       resolved start > end → warn 跳过
                                #   9       build_download_tasks(逐日 URL + 过滤本地已有)
                                #  10       run_downloads(client, tasks, concurrency) → 统计 ok/not_found/failed
                                #  11 失败 pair 聚合(≤20 明细); failed>0 → Err 否则 Ok
-app/01_scan_local_files.rs     # 扫描本地: spawn_blocking + walkdir 遍历 output_dir → HashSet<相对 .zip 路径>; 同遍删除 .tmp
-app/02_get_start_date.rs       # 起始日期: get_first_kline_date(client,symbol,tf) — redb 缓存命中直返; 否则请求 fapi klines limit=1&startTime=0 取首根写入缓存
+app/01_scan_local_files.rs     # 扫描本地: spawn_blocking + walkdir 遍历 output_dir → HashSet<相对 .zip 路径>; 目录不存在返回空; walk 错误 warn 不中断; 同遍删除 .tmp
+app/02_get_start_date.rs       # 起始日期: get_first_kline_date(client,symbol,tf) — redb 缓存命中直返; 否则请求 fapi klines limit=1&startTime=0 取首根写入缓存; HTTP 状态码检查: 429/5xx 指数重试, 其余 4xx 永久失败
 app/03_build_download_tasks.rs # 构建任务: build_urls 逐日生成 data.binance.vision URL + 相对路径(futures/um/daily/klines/{pair}/{tf}/{pair}-{tf}-{date}.zip) → 过滤本地已有 → Vec<DownloadTask>
 app/04_run_downloads/          # 运行下载
   mod.rs                       # 运行下载: futures buffer_unordered(concurrency) 有界并发(至少 1); 增量统计 total/ok/not_found/failed; 进度每 100 个; 失败明细 ≤20
-  stream.rs                    # 单文件下载: GET → dest 父目录建链 → .zip.tmp 流式写 → flush → rename 原子落盘; 404 永久不重试, 网络/5xx 指数重试(backoff ≤30s)
+  stream.rs                    # 单文件下载: GET → dest 父目录建链 → .zip.tmp 流式写 → flush → rename 原子落盘; 404 容忍(不重试); 网络错误/429/5xx 指数重试, 其余 4xx 永久失败
 ```

@@ -41,7 +41,9 @@ async fn download_to_file_with_backoff(
                     Err(BackoffError::Permanent(crate::AppError::NotFound {
                         url: u,
                     }))
-                } else {
+                } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error()
+                {
                     Err(BackoffError::Transient {
                         err: crate::AppError::DownloadFailed {
                             url: u,
@@ -49,6 +51,11 @@ async fn download_to_file_with_backoff(
                         },
                         retry_after: None,
                     })
+                } else {
+                    Err(BackoffError::Permanent(crate::AppError::DownloadFailed {
+                        url: u,
+                        reason: format!("HTTP {status}"),
+                    }))
                 };
             }
 

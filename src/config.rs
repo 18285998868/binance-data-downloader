@@ -4,6 +4,11 @@ use serde::Deserialize;
 
 use crate::AppError;
 
+/// Accepted timeframe values, matching Binance daily kline archives.
+const VALID_TIMEFRAMES: [&str; 12] = [
+    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d",
+];
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
@@ -38,10 +43,15 @@ impl AppConfig {
                 "symbol must contain at least one symbol".into(),
             ));
         }
-        if self.timeframe.is_empty() {
-            return Err(AppError::Config(
-                "timeframe must list at least one timeframe".into(),
-            ));
+        if !self.timeframe.is_empty()
+            && let Some(bad) = self
+                .timeframe
+                .iter()
+                .find(|tf| !VALID_TIMEFRAMES.contains(&tf.as_str()))
+        {
+            return Err(AppError::Config(format!(
+                "unsupported timeframe: {bad}, valid values: {VALID_TIMEFRAMES:?}"
+            )));
         }
         if self.concurrency == 0 {
             return Err(AppError::Config(
@@ -146,9 +156,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_timeframe_fails() {
-        let err = load("symbol = [\"BTCUSDT\"]\ntimeframe = []").unwrap_err();
-        assert!(err.to_string().contains("timeframe"));
+    fn empty_timeframe_ok() {
+        let cfg = load("symbol = [\"BTCUSDT\"]\ntimeframe = []").unwrap();
+        assert!(cfg.timeframe.is_empty());
+    }
+
+    #[test]
+    fn invalid_timeframe_fails() {
+        let err = load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1y\"]").unwrap_err();
+        assert!(err.to_string().contains("1y"));
     }
 
     #[test]
