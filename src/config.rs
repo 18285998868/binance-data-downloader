@@ -52,6 +52,15 @@ impl AppConfig {
     }
 }
 
+/// A download task: source URL, destination path and identifying metadata.
+#[derive(Debug, Clone)]
+pub struct DownloadTask {
+    pub url: String,
+    pub dest: PathBuf,
+    pub pair: String,
+    pub timeframe: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

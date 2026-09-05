@@ -3,7 +3,7 @@ pub mod stream;
 use std::future::Future;
 
 use crate::AppError;
-use crate::DownloadTask;
+use crate::config::DownloadTask;
 use futures::stream::{StreamExt, iter as stream_iter};
 use tracing::Instrument;
 

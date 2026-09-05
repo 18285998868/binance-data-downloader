@@ -3,8 +3,8 @@ use backoff::backoff::Backoff;
 use backoff::future::retry;
 use tokio::io::AsyncWriteExt;
 
-use crate::DownloadTask;
 use crate::backoff::default_backoff;
+use crate::config::DownloadTask;
 
 /// Download a zip file with retry, streaming directly to disk.
 ///

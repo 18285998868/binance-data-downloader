@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::DownloadTask;
+use crate::config::DownloadTask;
 
 /// A download URL with its relative storage path and metadata.
 pub struct DownloadUrl {
