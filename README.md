@@ -10,15 +10,15 @@ config/
   config.toml              # 实际运行配置(gitignore, 不提交)
   config.example.toml      # 配置模板(字段说明)
 data/                      # 下载产物: futures/um/daily/klines/{symbol}/{tf}/{symbol}-{tf}-{date}.zip (gitignore)
-LOGIC.md                   # 处理流程与技术细节
-docs/dev.md                # 历史开发笔记
+docs/dev.md                # 开发文档: 需求分析/技术选型/架构设计/具体逻辑
 src/
   main.rs                  # 入口: tracing → bdd::cli::parse → bdd::app::run
-  lib.rs                   # #[path] 模块声明 + DownloadTask 定义
+  lib.rs                   # 模块声明 (#[path]) + DownloadTask 定义
   error.rs                 # 支撑: AppError (thiserror)
   cache.rs                 # 支撑: redb 缓存 (read/write/TTL)
   backoff.rs               # 支撑: 默认指数退避 (max 30s)
-  steps/                   # 按流水线步骤归档 (磁盘文件名带数字前缀, 模块名 = 可读步骤名)
+  app/                     # 按流水线步骤归档 (磁盘文件名带数字前缀, 模块名 = 可读步骤名)
+    mod.rs                     app: 顶层编排 (run + run_one + resolve_start + 批统计)
     01_cli.rs                  cli:  解析 --config/-c
     02_config.rs               config: 加载/校验 TOML 配置
     03_scan_local_files.rs     scan_local_files: 扫描本地 .zip + 清理 .tmp
@@ -27,7 +27,6 @@ src/
     06_run_downloads/
       mod.rs                   run_downloads: buffer_unordered 有界并发 + 增量统计
       stream.rs                run_downloads: 单文件流式下载 .tmp → rename 原子写
-    07_app.rs                  app: 顶层编排 (run + run_one + resolve_start + 批统计)
 ```
 
 ## 配置
