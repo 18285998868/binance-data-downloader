@@ -24,6 +24,9 @@ pub enum AppError {
     #[error("Date error: {0}")]
     Date(String),
 
+    #[error("Cache error: {0}")]
+    Cache(String),
+
     #[error("Download failed for {url}: {reason}")]
     DownloadFailed { url: String, reason: String },
 

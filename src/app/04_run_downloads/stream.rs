@@ -66,6 +66,11 @@ async fn download_to_file_with_backoff(
             }
 
             let tmp_path = dest.with_extension("zip.tmp");
+            match tokio::fs::remove_file(&tmp_path).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(BackoffError::Permanent(crate::AppError::Io(e))),
+            }
             let mut file = tokio::fs::File::create(&tmp_path)
                 .await
                 .map_err(|e| BackoffError::Permanent(crate::AppError::Io(e)))?;

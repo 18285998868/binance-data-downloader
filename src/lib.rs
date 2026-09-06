@@ -6,17 +6,9 @@
 //! Module layout: support modules (`cli`, `config`, `error`, `cache`,
 //! `backoff`) live at the crate root; the download pipeline lives in
 //! `app/`, whose numbered files (`NN_` prefix) encode execution order and
-//! are wired via `#[path]`.
+//! are wired via `#[path]` as submodules of `app`.
 
 pub mod app;
-#[path = "app/03_build_download_tasks.rs"]
-pub mod build_download_tasks;
-#[path = "app/02_get_start_date.rs"]
-pub mod get_start_date;
-#[path = "app/04_run_downloads/mod.rs"]
-pub mod run_downloads;
-#[path = "app/01_scan_local_files.rs"]
-pub mod scan_local_files;
 
 pub mod backoff;
 pub mod cache;

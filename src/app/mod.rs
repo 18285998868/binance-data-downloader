@@ -1,13 +1,18 @@
+#[path = "03_build_download_tasks.rs"]
+pub mod build_download_tasks;
+#[path = "02_get_start_date.rs"]
+pub mod get_start_date;
+#[path = "04_run_downloads/mod.rs"]
+pub mod run_downloads;
+#[path = "01_scan_local_files.rs"]
+pub mod scan_local_files;
+
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
 use crate::AppError;
-use crate::build_download_tasks;
 use crate::config::AppConfig;
-use crate::get_start_date;
-use crate::run_downloads;
-use crate::scan_local_files::scan_local_files;
 
 /// Run the full batch download pipeline.
 ///
@@ -25,7 +30,7 @@ pub async fn run(config_path: &Path) -> Result<(), AppError> {
         .build()?;
 
     let data_dir = cfg.output_dir.clone();
-    let local = scan_local_files(&data_dir).await?;
+    let local = scan_local_files::scan_local_files(&data_dir).await?;
 
     let symbols = cfg.symbol.clone();
     let timeframes = cfg.timeframe.clone();
@@ -41,6 +46,14 @@ pub async fn run(config_path: &Path) -> Result<(), AppError> {
         concurrency,
         "starting batch download",
     );
+
+    if !symbols.is_empty() && !timeframes.is_empty() && cfg.start.is_none() {
+        tracing::info!(
+            count = symbols.len() * timeframes.len(),
+            "first start-date per symbol×timeframe is resolved by an individual request to the \
+             Binance API and cached for 30 days; this can take a while on a fresh run",
+        );
+    }
 
     let mut failed_pairs = 0;
     let mut errors = Vec::new();

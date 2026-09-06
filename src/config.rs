@@ -43,11 +43,15 @@ impl AppConfig {
                 "symbol must contain at least one symbol".into(),
             ));
         }
-        if !self.timeframe.is_empty()
-            && let Some(bad) = self
-                .timeframe
-                .iter()
-                .find(|tf| !VALID_TIMEFRAMES.contains(&tf.as_str()))
+        if self.timeframe.is_empty() {
+            return Err(AppError::Config(
+                "timeframe must contain at least one timeframe".into(),
+            ));
+        }
+        if let Some(bad) = self
+            .timeframe
+            .iter()
+            .find(|tf| !VALID_TIMEFRAMES.contains(&tf.as_str()))
         {
             return Err(AppError::Config(format!(
                 "unsupported timeframe: {bad}, valid values: {VALID_TIMEFRAMES:?}"
@@ -156,9 +160,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_timeframe_ok() {
-        let cfg = load("symbol = [\"BTCUSDT\"]\ntimeframe = []").unwrap();
-        assert!(cfg.timeframe.is_empty());
+    fn empty_timeframe_fails() {
+        let err = load("symbol = [\"BTCUSDT\"]\ntimeframe = []").unwrap_err();
+        assert!(err.to_string().contains("timeframe"));
     }
 
     #[test]

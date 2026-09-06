@@ -6,6 +6,8 @@ use crate::backoff::default_backoff;
 use crate::cache;
 
 const CACHE_DOMAIN: &str = "start_date";
+/// Cached first-kline dates are considered stale after 30 days.
+const CACHE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
 fn klines_url(symbol: &str, timeframe: &str) -> String {
     format!(
@@ -20,18 +22,20 @@ pub async fn get_first_kline_date(
     timeframe: &str,
 ) -> Result<chrono::NaiveDate, AppError> {
     let key = format!("{symbol}:{timeframe}");
-    if let Some(cached) = cache::read(CACHE_DOMAIN, &key, None) {
+    if let Some(cached) = cache::read(CACHE_DOMAIN, &key, Some(CACHE_TTL_SECS)) {
         let s = std::str::from_utf8(&cached).map_err(|e| AppError::Data(e.to_string()))?;
         let d = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
             .map_err(|e| AppError::Date(e.to_string()))?;
         return Ok(d);
     }
     let date = fetch_first_kline(client, symbol, timeframe).await?;
-    cache::write(
+    if let Err(e) = cache::write(
         CACHE_DOMAIN,
         &key,
         date.format("%Y-%m-%d").to_string().as_bytes(),
-    );
+    ) {
+        tracing::warn!(symbol, timeframe, "failed to cache start date: {e}");
+    }
     Ok(date)
 }
 

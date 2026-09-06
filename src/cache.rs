@@ -5,6 +5,8 @@ use std::sync::{LazyLock, Mutex};
 
 use redb::{Database, ReadableDatabase, TableDefinition};
 
+use crate::AppError;
+
 const TABLE: TableDefinition<&str, Vec<u8>> = TableDefinition::new("data");
 
 static DBS: LazyLock<Mutex<HashMap<String, Arc<Database>>>> =
@@ -17,30 +19,21 @@ fn db_path(domain: &str) -> PathBuf {
     }
 }
 
-fn ensure_db(domain: &str) -> Option<Arc<Database>> {
-    let mut map = DBS.lock().unwrap_or_else(|e| {
-        tracing::warn!(domain, "cache mutex poisoned: {e}");
-        e.into_inner()
-    });
+fn ensure_db(domain: &str) -> Result<Arc<Database>, AppError> {
+    let mut map = DBS
+        .lock()
+        .map_err(|e| AppError::Cache(format!("mutex poisoned: {e}")))?;
     if let Some(db) = map.get(domain) {
-        return Some(Arc::clone(db));
+        return Ok(Arc::clone(db));
     }
     let path = db_path(domain);
-    if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        tracing::error!(domain, path = %parent.display(), "cache ensure_db create_dir_all: {e}");
-        return None;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
-    let db = match Database::create(&path) {
-        Ok(db) => Arc::new(db),
-        Err(e) => {
-            tracing::error!(domain, path = %path.display(), "cache ensure_db create: {e}");
-            return None;
-        }
-    };
+    let db = Database::create(&path).map_err(|e| AppError::Cache(e.to_string()))?;
+    let db = Arc::new(db);
     map.insert(domain.to_string(), Arc::clone(&db));
-    Some(db)
+    Ok(db)
 }
 
 macro_rules! log_none {
@@ -65,7 +58,13 @@ macro_rules! log_none {
 }
 
 pub fn read(domain: &str, key: &str, ttl_secs: Option<u64>) -> Option<Vec<u8>> {
-    let db = ensure_db(domain)?;
+    let db = match ensure_db(domain) {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::warn!(domain, "cache read ensure_db failed: {e}");
+            return None;
+        }
+    };
     let read_tx = log_none!(db.begin_read(), domain, "cache read begin_read");
     let table = log_none!(read_tx.open_table(TABLE), domain, "cache read open_table");
     let guard = log_none!(table.get(key), domain, key, "cache read get")?;
@@ -89,14 +88,8 @@ pub fn read(domain: &str, key: &str, ttl_secs: Option<u64>) -> Option<Vec<u8>> {
     Some(data.to_vec())
 }
 
-pub fn write(domain: &str, key: &str, data: &[u8]) {
-    let db = match ensure_db(domain) {
-        Some(db) => db,
-        None => {
-            tracing::warn!(domain, "cache write skipped: ensure_db failed");
-            return;
-        }
-    };
+pub fn write(domain: &str, key: &str, data: &[u8]) -> Result<(), AppError> {
+    let db = ensure_db(domain)?;
     let cached_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -104,20 +97,22 @@ pub fn write(domain: &str, key: &str, data: &[u8]) {
     let mut buf = Vec::with_capacity(8 + data.len());
     buf.extend_from_slice(&cached_at.to_le_bytes());
     buf.extend_from_slice(data);
-    if let Ok(write_tx) = db.begin_write() {
-        if let Ok(mut table) = write_tx.open_table(TABLE) {
-            if table.insert(key, buf).is_err() {
-                tracing::error!(domain, key, "cache write insert failed");
-            }
-        } else {
-            tracing::error!(domain, key, "cache write open_table failed");
-        }
-        if write_tx.commit().is_err() {
-            tracing::error!(domain, key, "cache write commit failed");
-        }
-    } else {
-        tracing::error!(domain, key, "cache write begin_write failed");
+
+    let write_tx = db
+        .begin_write()
+        .map_err(|e| AppError::Cache(e.to_string()))?;
+    {
+        let mut table = write_tx
+            .open_table(TABLE)
+            .map_err(|e| AppError::Cache(e.to_string()))?;
+        table
+            .insert(key, buf)
+            .map_err(|e| AppError::Cache(e.to_string()))?;
     }
+    write_tx
+        .commit()
+        .map_err(|e| AppError::Cache(e.to_string()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -144,7 +139,7 @@ mod tests {
     #[test]
     fn write_then_read() {
         with_cache(|| {
-            write("test_domain", "key1", b"hello");
+            write("test_domain", "key1", b"hello").unwrap();
             let val = read("test_domain", "key1", None);
             assert_eq!(val, Some(b"hello".to_vec()));
         });
@@ -161,7 +156,7 @@ mod tests {
     #[test]
     fn read_expired_entry() {
         with_cache(|| {
-            write("test_domain", "key1", b"data");
+            write("test_domain", "key1", b"data").unwrap();
             // TTL = 0 → immediately expired
             let val = read("test_domain", "key1", Some(0));
             assert_eq!(val, None);
