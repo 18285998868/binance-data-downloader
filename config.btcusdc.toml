@@ -1,0 +1,4 @@
+symbol = ["BTCUSDC"]
+timeframe = ["1m", "3m", "5m", "15m"]
+output_dir = "/data/nutilustrader/data"
+concurrency = 16
