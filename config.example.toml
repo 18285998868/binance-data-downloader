@@ -1,7 +1,27 @@
 # 配置说明: 全部字段以小写字母开头
+#
+# 目录约定 (重要): output_dir 是数据**根目录**, 程序会自动在其下追加
+#   futures/um/daily/klines/{symbol}/{timeframe}/{symbol}-{timeframe}-{date}.zip
+# 因此不要把 futures/um/daily/klines 写进 output_dir, 否则会生成重复的嵌套目录:
+#   错误: output_dir = "/data/futures/um/daily/klines"
+#         → /data/futures/um/daily/klines/futures/um/daily/klines/...
+#   正确: output_dir = "/data"
+#         → /data/futures/um/daily/klines/...
+#
 symbol = ["BTCUSDT"] # 下载的交易对列表, 必填
 timeframe = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"] # K线周期, 必填, 默认值: 无, 可选参数: ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d"]
 # start = "2020-01-01" # 开始时间, 可选, 默认值: 无, 可选参数: YYYY-MM-DD
 # end = "2025-01-01" # 结束时间, 可选, 默认值: 昨天, 可选参数: YYYY-MM-DD
-# output_dir = "data" # 输出目录, 可选, 默认值: "data", 可选参数: 任意目录路径
+# output_dir = "data" # 数据根目录(不含 futures/um/daily/klines), 可选, 默认值: "data", 可选参数: 任意目录路径
 # concurrency = 16 # 每个 (symbol × timeframe) 配对内的最大并发下载数, 可选, 默认值: 16, 可选参数: 正整数(≠0)
+
+# 完整示例: 8 币 × 12 周期补全到最新
+# symbol = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "LINKUSDT"]
+# timeframe = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
+# start = "2020-01-01"
+# end = "2026-09-30"
+# output_dir = "/data/nutilustrader/data"
+# concurrency = 16
+#
+# 说明: 程序按 (symbol × timeframe) 串行处理每个配对, 配对内并发下载;
+#       已存在的 .zip 会跳过, 故本配置可用于增量补全, 重复执行安全。
