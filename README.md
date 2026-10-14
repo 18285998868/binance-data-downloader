@@ -1,12 +1,12 @@
-# binance-data-downloader 项目开发
+# binance-data-downloader
 
-## 需求分析
+## 项目目标
 
-- 项目目标: 从 [Binance Public Data](https://data.binance.vision/?prefix=data/futures/um/daily/klines/) 下载 永续合约日度 K 线归档(zip)
+> 从 [Binance Public Data](https://data.binance.vision/?prefix=data/futures/um/daily/klines/) 下载 永续合约日度 K 线归档(zip)
 
 ## 技术选型
 
-- 语言:rust
+- rust
 - edition = "2024"
 
 ## 冒烟配置
