@@ -68,12 +68,14 @@ mod tests {
     #[tokio::test]
     async fn scan_finds_zip_files() {
         let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("futures/um/daily/klines/BTCUSDT/1m");
+        let data = dir.path().join("binance/data/um/daily/klines/BTCUSDT/1m");
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(data.join("BTCUSDT-1m-2024-01-01.zip"), b"zip").unwrap();
         let files = scan_local_files(dir.path()).await.unwrap();
         assert_eq!(files.len(), 1);
-        assert!(files.contains("futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip"));
+        assert!(
+            files.contains("binance/data/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip")
+        );
     }
 
     #[tokio::test]
@@ -87,13 +89,15 @@ mod tests {
     #[tokio::test]
     async fn scan_removes_tmp_files() {
         let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("futures/um/daily/klines/BTCUSDT/1m");
+        let data = dir.path().join("binance/data/um/daily/klines/BTCUSDT/1m");
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(data.join("BTCUSDT-1m-2024-01-01.zip"), b"zip").unwrap();
         std::fs::write(data.join("BTCUSDT-1m-2024-01-01.tmp"), b"tmp").unwrap();
         let files = scan_local_files(dir.path()).await.unwrap();
         assert_eq!(files.len(), 1);
-        assert!(files.contains("futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip"));
+        assert!(
+            files.contains("binance/data/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip")
+        );
         assert!(!data.join("BTCUSDT-1m-2024-01-01.tmp").exists());
     }
 }

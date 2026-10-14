@@ -3,8 +3,8 @@ use backoff::backoff::Backoff;
 use backoff::future::retry;
 use tokio::io::AsyncWriteExt;
 
-use crate::backoff::default_backoff;
 use crate::config::DownloadTask;
+use crate::utils::backoff::default_backoff;
 
 /// Download a zip file with retry, streaming directly to disk.
 ///
@@ -120,7 +120,7 @@ mod tests {
     fn make_task(server: &MockServer) -> DownloadTask {
         DownloadTask {
             url: format!(
-                "{}/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip",
+                "{}/data/binance/data/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip",
                 server.uri()
             ),
             dest: std::path::PathBuf::from("/tmp/test-download.zip"),
@@ -134,7 +134,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(
-                "/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip",
+                "/data/binance/data/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(b"zipdata"))
             .mount(&server)

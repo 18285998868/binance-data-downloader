@@ -2,8 +2,8 @@ use backoff::Error as BackoffError;
 use backoff::future::retry;
 
 use crate::AppError;
-use crate::backoff::default_backoff;
-use crate::cache;
+use crate::utils::backoff::default_backoff;
+use crate::utils::cache;
 
 const CACHE_DOMAIN: &str = "start_date";
 /// Cached first-kline dates are considered stale after 30 days.

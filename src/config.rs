@@ -10,34 +10,46 @@ const VALID_TIMEFRAMES: [&str; 12] = [
 ];
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub symbol: Vec<String>,
     pub timeframe: Vec<String>,
     pub start: Option<chrono::NaiveDate>,
     pub end: Option<chrono::NaiveDate>,
-    #[serde(default = "default_output_dir")]
     pub output_dir: PathBuf,
-    #[serde(default = "default_concurrency")]
     pub concurrency: usize,
 }
 
-fn default_output_dir() -> PathBuf {
-    PathBuf::from("data")
-}
-
-fn default_concurrency() -> usize {
-    16
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            symbol: Vec::new(),
+            timeframe: Vec::new(),
+            start: None,
+            end: None,
+            output_dir: PathBuf::from("data"),
+            concurrency: 64,
+        }
+    }
 }
 
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self, AppError> {
-        let raw = std::fs::read_to_string(path).map_err(|e| AppError::Config(e.to_string()))?;
-        let cfg: Self = toml::from_str(&raw).map_err(|e| AppError::Config(e.to_string()))?;
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| AppError::Config(format!("{}: {e}", path.display())))?;
+        let cfg: Self = toml::from_str(&raw)
+            .map_err(|e| AppError::Config(format!("{}: {e}", path.display())))?;
         cfg.validate()
     }
 
-    fn validate(self) -> Result<Self, AppError> {
+    /// Resolve the download end date: `min(config.end, yesterday)`.
+    /// Computed once by the caller; downstream only consumes the value.
+    pub fn resolved_end(&self, today: chrono::NaiveDate) -> chrono::NaiveDate {
+        let yesterday = today - chrono::Duration::days(1);
+        self.end.map(|e| e.min(yesterday)).unwrap_or(yesterday)
+    }
+
+    fn validate(mut self) -> Result<Self, AppError> {
         if self.symbol.is_empty() {
             return Err(AppError::Config(
                 "symbol must contain at least one symbol".into(),
@@ -62,6 +74,17 @@ impl AppConfig {
                 "concurrency must be greater than zero".into(),
             ));
         }
+        if let (Some(start), Some(end)) = (self.start, self.end)
+            && start > end
+        {
+            return Err(AppError::Config(format!(
+                "start {start} is after end {end}"
+            )));
+        }
+        self.symbol.sort();
+        self.symbol.dedup();
+        self.timeframe.sort();
+        self.timeframe.dedup();
         Ok(self)
     }
 }
@@ -105,7 +128,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.symbol, vec!["BTCUSDT", "ETHUSDT"]);
-        assert_eq!(cfg.timeframe, vec!["1m", "1d"]);
+        assert_eq!(cfg.timeframe, vec!["1d", "1m"]);
         assert_eq!(
             cfg.start,
             Some(chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
@@ -115,7 +138,7 @@ mod tests {
             Some(chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())
         );
         assert_eq!(cfg.output_dir, PathBuf::from("/tmp/data"));
-        assert_eq!(cfg.concurrency, 16);
+        assert_eq!(cfg.concurrency, 64);
     }
 
     #[test]
@@ -181,6 +204,46 @@ mod tests {
     #[test]
     fn unknown_field_fails() {
         assert!(load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\ntomeframe = \"1m\"").is_err());
+    }
+
+    #[test]
+    fn resolved_end_clamps_future_to_yesterday() {
+        let cfg =
+            load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\nend = \"2030-01-10\"").unwrap();
+        let today = chrono::NaiveDate::from_ymd_opt(2030, 1, 10).unwrap();
+        assert_eq!(
+            cfg.resolved_end(today),
+            chrono::NaiveDate::from_ymd_opt(2030, 1, 9).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolved_end_defaults_to_yesterday() {
+        let cfg = load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]").unwrap();
+        let today = chrono::NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
+        assert_eq!(
+            cfg.resolved_end(today),
+            chrono::NaiveDate::from_ymd_opt(2024, 6, 14).unwrap()
+        );
+    }
+
+    #[test]
+    fn start_after_end_fails() {
+        let err = load(
+            "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\nstart = \"2024-02-01\"\nend = \"2024-01-01\"",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("start"));
+    }
+
+    #[test]
+    fn duplicates_are_sorted_and_deduped() {
+        let cfg = load(
+            "symbol = [\"ETHUSDT\", \"BTCUSDT\", \"ETHUSDT\"]\ntimeframe = [\"1d\", \"1m\", \"1m\"]",
+        )
+        .unwrap();
+        assert_eq!(cfg.symbol, vec!["BTCUSDT", "ETHUSDT"]);
+        assert_eq!(cfg.timeframe, vec!["1d", "1m"]);
     }
 
     #[test]

@@ -12,7 +12,23 @@ const TABLE: TableDefinition<&str, Vec<u8>> = TableDefinition::new("data");
 static DBS: LazyLock<Mutex<HashMap<String, Arc<Database>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Cache root override (output directory). Set once at startup via
+/// [`set_base_dir`]; falls back to the user home when unset (tests).
+static BASE: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Point the cache at `output_dir/.cache`. Call once before any read/write.
+pub fn set_base_dir(dir: &std::path::Path) -> Result<(), AppError> {
+    BASE.lock()
+        .map(|mut base| *base = Some(dir.join(".cache")))
+        .map_err(|e| AppError::Cache(format!("mutex poisoned: {e}")))
+}
+
 fn db_path(domain: &str) -> PathBuf {
+    if let Ok(base) = BASE.lock()
+        && let Some(root) = base.as_ref()
+    {
+        return root.join(format!("{domain}/{domain}.redb"));
+    }
     match std::env::var_os("HOME") {
         Some(home) => PathBuf::from(home).join(format!(".cache/{domain}/{domain}.redb")),
         None => PathBuf::from(format!("/tmp/{domain}/{domain}.redb")),
@@ -20,19 +36,20 @@ fn db_path(domain: &str) -> PathBuf {
 }
 
 fn ensure_db(domain: &str) -> Result<Arc<Database>, AppError> {
+    let path = db_path(domain);
+    let key = path.to_string_lossy().into_owned();
     let mut map = DBS
         .lock()
         .map_err(|e| AppError::Cache(format!("mutex poisoned: {e}")))?;
-    if let Some(db) = map.get(domain) {
+    if let Some(db) = map.get(&key) {
         return Ok(Arc::clone(db));
     }
-    let path = db_path(domain);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
     let db = Database::create(&path).map_err(|e| AppError::Cache(e.to_string()))?;
     let db = Arc::new(db);
-    map.insert(domain.to_string(), Arc::clone(&db));
+    map.insert(key, Arc::clone(&db));
     Ok(db)
 }
 
