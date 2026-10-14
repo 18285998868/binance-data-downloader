@@ -3,6 +3,28 @@
 ## 项目目标
 
 > 从 [Binance Public Data](https://data.binance.vision/?prefix=data/futures/um/daily/klines/) 下载 永续合约 K 线数据文件(保持原始交易所文件格式)
+> 网站数据布局:
+
+- 网址: https://data.binance.vision
+  - futures/
+    - cm/
+    - um/
+      - daily/
+        - aggTrades/
+        - bookDepth/
+        - bookTicker/
+        - indexPriceKlines/
+        - klines/
+          - {symbol}/
+            - {timeframe}/
+              - {symbol}-{timeframe}-{yyyy-mm-dd}.zip
+        - markPriceKlines/
+        - metrics/
+        - premiumIndexKlines/
+        - trades/
+      - monthly/
+  - option/
+  - spot/
 
 ## 技术选型
 
@@ -48,7 +70,7 @@ app/
   01_build_urls.rs
   02_build_download_tasks.rs
   03_download.rs
-  
+
 ```
 
 ## 实现
