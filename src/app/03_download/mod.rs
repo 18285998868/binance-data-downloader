@@ -25,9 +25,32 @@ impl DownloadStats {
     fn done(&self) -> usize {
         self.ok + self.not_found + self.failed
     }
+
+    /// Fold another batch's stats into this one.
+    pub fn absorb(&mut self, other: Self) {
+        self.total += other.total;
+        self.ok += other.ok;
+        self.not_found += other.not_found;
+        self.failed += other.failed;
+    }
+
+    /// `not_found` as a percentage of `total` (0.0 when nothing ran).
+    #[must_use]
+    pub fn not_found_pct(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            100.0 * self.not_found as f64 / self.total as f64
+        }
+    }
 }
 
 /// Download all tasks with bounded concurrency.
+///
+/// # Errors
+///
+/// Returns [`AppError::Data`] when one or more downloads fail (404s are
+/// tolerated and not counted as failures).
 pub async fn run_downloads(
     client: &reqwest::Client,
     tasks: Vec<DownloadTask>,
@@ -102,10 +125,11 @@ where
     }
 
     if stats.not_found > 0 {
-        tracing::debug!(
+        tracing::warn!(
             not_found = stats.not_found,
             total = stats.total,
-            "files not found on server (404, expected for edge dates)",
+            pct = stats.not_found_pct(),
+            "files not found on the server (404, expected for edge dates; investigate if unexpected)",
         );
     }
     if stats.failed > logged_failures {
@@ -116,10 +140,10 @@ where
     }
 
     if stats.failed > 0 {
-        return Err(AppError::DownloadFailed {
-            url: "batch".into(),
-            reason: format!("{}/{} failed", stats.failed, stats.total),
-        });
+        return Err(AppError::Data(format!(
+            "{} of {} downloads failed",
+            stats.failed, stats.total
+        )));
     }
     Ok(stats)
 }
@@ -208,7 +232,7 @@ mod tests {
         let err = run_downloads_inner(&client, tasks, 16, download_fn)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("1/3 failed"));
+        assert!(err.to_string().contains("1 of 3 downloads failed"));
     }
 
     #[tokio::test]
@@ -228,7 +252,7 @@ mod tests {
         let err = run_downloads_inner(&client, tasks, 16, download_fn)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("1/2 failed"));
+        assert!(err.to_string().contains("1 of 2 downloads failed"));
     }
 
     #[tokio::test]
@@ -259,6 +283,40 @@ mod tests {
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
     }
 
+    // — DownloadStats —
+
+    #[test]
+    fn stats_absorb_sums_all_fields() {
+        let mut a = DownloadStats {
+            total: 10,
+            ok: 8,
+            not_found: 1,
+            failed: 1,
+        };
+        a.absorb(DownloadStats {
+            total: 5,
+            ok: 5,
+            not_found: 0,
+            failed: 0,
+        });
+        assert_eq!(a.total, 15);
+        assert_eq!(a.ok, 13);
+        assert_eq!(a.not_found, 1);
+        assert_eq!(a.failed, 1);
+    }
+
+    #[test]
+    fn stats_not_found_pct() {
+        let stats = DownloadStats {
+            total: 20,
+            ok: 15,
+            not_found: 5,
+            failed: 0,
+        };
+        assert!((stats.not_found_pct() - 25.0).abs() < f64::EPSILON);
+        assert_eq!(DownloadStats::default().not_found_pct(), 0.0);
+    }
+
     // — helpers —
 
     fn dummy_task(pair: &str) -> DownloadTask {
@@ -266,7 +324,7 @@ mod tests {
             url: format!("http://example.com/{pair}"),
             dest: std::path::PathBuf::from("/tmp"),
             pair: pair.into(),
-            timeframe: "1m".into(),
+            timeframe: crate::config::Timeframe::M1,
         }
     }
 }

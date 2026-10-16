@@ -6,13 +6,16 @@
 //! Module layout: `app/` holds the naive pipeline (`01_build_urls`,
 //! `02_build_download_tasks`, `03_download/`); patches live in `utils/`
 //! (`get_start_date`, `scan_local_files`, `cache`, `backoff`).
+//!
+//! The modules are an implementation detail; the public surface is
+//! [`run`], [`Cli`] and [`AppError`].
 
-pub mod app;
-
-pub mod cli;
-pub mod config;
-pub mod error;
-pub mod utils;
+mod app;
+mod cli;
+mod config;
+mod error;
+mod utils;
 
 pub use app::run;
+pub use cli::Cli;
 pub use error::AppError;

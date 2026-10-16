@@ -4,6 +4,7 @@
 //! full download pipeline with the provided TOML configuration.
 
 use anyhow::Context;
+use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -16,10 +17,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Parse command-line arguments (`--config`/`-c` is required).
-    let cli = bdd::cli::parse();
+    let cli = bdd::Cli::parse();
 
     // Run the download pipeline, annotating any error with pipeline context.
-    bdd::app::run(&cli.config)
+    bdd::run(&cli.config)
         .await
         .context("binance-data-downloader run failed")?;
     Ok(())

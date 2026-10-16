@@ -3,36 +3,39 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AppError {
-    #[error("HTTP error: {0}")]
+    #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 
-    #[error("I/O error: {0}")]
+    #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("JSON error: {0}")]
+    #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("Config error: {0}")]
+    #[error("config error: {0}")]
     Config(String),
 
-    #[error("API error: {0}")]
+    #[error("api error: {0}")]
     Api(String),
 
-    #[error("Data error: {0}")]
+    #[error("unknown symbol: {symbol}")]
+    UnknownSymbol { symbol: String },
+
+    #[error("data error: {0}")]
     Data(String),
 
-    #[error("Date error: {0}")]
+    #[error("date error: {0}")]
     Date(String),
 
-    #[error("Cache error: {0}")]
+    #[error("cache error: {0}")]
     Cache(String),
 
-    #[error("Download failed for {url}: {reason}")]
+    #[error("download failed for {url}: {reason}")]
     DownloadFailed { url: String, reason: String },
 
-    #[error("Not found")]
+    #[error("not found: {url}")]
     NotFound { url: String },
 
-    #[error("Task join error: {0}")]
+    #[error("task join error: {0}")]
     Join(#[from] tokio::task::JoinError),
 }

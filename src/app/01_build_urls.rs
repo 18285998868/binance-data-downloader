@@ -1,41 +1,50 @@
+use crate::config::Timeframe;
+
 /// A download URL with its relative storage path and metadata.
+#[derive(Debug)]
 pub struct DownloadUrl {
     pub url: String,
     pub rel_path: String,
     pub pair: String,
-    pub timeframe: String,
+    pub timeframe: Timeframe,
 }
 
 /// Server-side path on data.binance.vision (fixed by the exchange).
 const SERVER_PREFIX: &str = "data/futures/um/daily/klines";
-/// Local storage root below output_dir (our choice).
+/// Local storage root below `output_dir` (our choice).
 const LOCAL_PREFIX: &str = "binance/data/um/daily/klines";
+/// Public data archive base URL.
+const ARCHIVE_BASE: &str = "https://data.binance.vision";
 
 /// Generate daily kline download URLs for a date range.
+#[must_use]
 pub fn build_urls(
     pair: &str,
-    tf: &str,
+    tf: Timeframe,
     date_start: chrono::NaiveDate,
     date_end: chrono::NaiveDate,
 ) -> Vec<DownloadUrl> {
     if date_start > date_end {
         return Vec::new();
     }
-    let n_days = ((date_end - date_start).num_days() as usize).max(1);
+    let tf_name = tf.as_str();
+    let n_days = usize::try_from((date_end - date_start).num_days())
+        .unwrap_or(0)
+        .max(1);
     let mut result = Vec::with_capacity(n_days);
 
     let mut cursor = date_start;
     while cursor <= date_end {
         let date_str = cursor.format("%Y-%m-%d").to_string();
-        let filename = format!("{pair}-{tf}-{date_str}.zip");
-        let server_rel = format!("{SERVER_PREFIX}/{pair}/{tf}/{filename}");
-        let local_rel = format!("{LOCAL_PREFIX}/{pair}/{tf}/{filename}");
-        let url = format!("https://data.binance.vision/{server_rel}");
+        let filename = format!("{pair}-{tf_name}-{date_str}.zip");
+        let server_rel = format!("{SERVER_PREFIX}/{pair}/{tf_name}/{filename}");
+        let local_rel = format!("{LOCAL_PREFIX}/{pair}/{tf_name}/{filename}");
+        let url = format!("{ARCHIVE_BASE}/{server_rel}");
         result.push(DownloadUrl {
             url,
             rel_path: local_rel,
             pair: pair.to_string(),
-            timeframe: tf.to_string(),
+            timeframe: tf,
         });
         cursor += chrono::Duration::days(1);
     }
@@ -54,7 +63,7 @@ mod tests {
     fn build_urls_single_day() {
         let urls = build_urls(
             "BTCUSDT",
-            "1m",
+            Timeframe::M1,
             chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
         );
@@ -75,7 +84,7 @@ mod tests {
     fn build_urls_multi_day() {
         let urls = build_urls(
             "BTCUSDT",
-            "1m",
+            Timeframe::M1,
             chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             chrono::NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
         );
@@ -89,7 +98,7 @@ mod tests {
     fn build_urls_rel_path_format() {
         let urls = build_urls(
             "ETHUSDT",
-            "5m",
+            Timeframe::M5,
             chrono::NaiveDate::from_ymd_opt(2024, 6, 15).unwrap(),
             chrono::NaiveDate::from_ymd_opt(2024, 6, 15).unwrap(),
         );
@@ -101,6 +110,14 @@ mod tests {
 
     #[test]
     fn build_urls_empty_range() {
-        assert!(build_urls("BTCUSDT", "1m", date(2024, 6, 1), date(2024, 5, 31),).is_empty());
+        assert!(
+            build_urls(
+                "BTCUSDT",
+                Timeframe::M1,
+                date(2024, 6, 1),
+                date(2024, 5, 31),
+            )
+            .is_empty()
+        );
     }
 }

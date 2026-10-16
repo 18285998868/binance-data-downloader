@@ -4,16 +4,93 @@ use serde::Deserialize;
 
 use crate::AppError;
 
-/// Accepted timeframe values, matching Binance daily kline archives.
-const VALID_TIMEFRAMES: [&str; 12] = [
-    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d",
-];
+/// Binance kline interval, matching the archive's directory/interval names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Timeframe {
+    M1,
+    M3,
+    M5,
+    M15,
+    M30,
+    H1,
+    H2,
+    H4,
+    H6,
+    H8,
+    H12,
+    D1,
+}
+
+impl Timeframe {
+    /// All accepted timeframes, ordered by duration.
+    pub const ALL: [Self; 12] = [
+        Self::M1,
+        Self::M3,
+        Self::M5,
+        Self::M15,
+        Self::M30,
+        Self::H1,
+        Self::H2,
+        Self::H4,
+        Self::H6,
+        Self::H8,
+        Self::H12,
+        Self::D1,
+    ];
+
+    /// Archive name, e.g. `1m` or `1d`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::M1 => "1m",
+            Self::M3 => "3m",
+            Self::M5 => "5m",
+            Self::M15 => "15m",
+            Self::M30 => "30m",
+            Self::H1 => "1h",
+            Self::H2 => "2h",
+            Self::H4 => "4h",
+            Self::H6 => "6h",
+            Self::H8 => "8h",
+            Self::H12 => "12h",
+            Self::D1 => "1d",
+        }
+    }
+}
+
+impl std::fmt::Display for Timeframe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Timeframe {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|tf| tf.as_str() == s)
+            .ok_or_else(|| {
+                let valid: Vec<&str> = Self::ALL.iter().map(|tf| tf.as_str()).collect();
+                format!("unsupported timeframe: {s}, valid values: {valid:?}")
+            })
+    }
+}
+
+impl<'de> Deserialize<'de> for Timeframe {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub symbol: Vec<String>,
-    pub timeframe: Vec<String>,
+    pub timeframe: Vec<Timeframe>,
     pub start: Option<chrono::NaiveDate>,
     pub end: Option<chrono::NaiveDate>,
     pub output_dir: PathBuf,
@@ -33,7 +110,18 @@ impl Default for AppConfig {
     }
 }
 
+/// Sanity ceiling for `concurrency`: each in-flight download costs a socket,
+/// a file handle and buffers, so anything beyond this is almost certainly a
+/// typo rather than intent.
+const MAX_CONCURRENCY: usize = 1024;
+
 impl AppConfig {
+    /// Load and validate configuration from a TOML file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Config`] when the file cannot be read, the TOML is
+    /// invalid, or validation fails.
     pub fn load(path: &Path) -> Result<Self, AppError> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| AppError::Config(format!("{}: {e}", path.display())))?;
@@ -44,9 +132,10 @@ impl AppConfig {
 
     /// Resolve the download end date: `min(config.end, yesterday)`.
     /// Computed once by the caller; downstream only consumes the value.
+    #[must_use]
     pub fn resolved_end(&self, today: chrono::NaiveDate) -> chrono::NaiveDate {
         let yesterday = today - chrono::Duration::days(1);
-        self.end.map(|e| e.min(yesterday)).unwrap_or(yesterday)
+        self.end.map_or(yesterday, |e| e.min(yesterday))
     }
 
     fn validate(mut self) -> Result<Self, AppError> {
@@ -60,25 +149,28 @@ impl AppConfig {
                 "timeframe must contain at least one timeframe".into(),
             ));
         }
-        if let Some(bad) = self
-            .timeframe
-            .iter()
-            .find(|tf| !VALID_TIMEFRAMES.contains(&tf.as_str()))
-        {
-            return Err(AppError::Config(format!(
-                "unsupported timeframe: {bad}, valid values: {VALID_TIMEFRAMES:?}"
-            )));
-        }
         if self.concurrency == 0 {
             return Err(AppError::Config(
                 "concurrency must be greater than zero".into(),
             ));
+        }
+        if self.concurrency > MAX_CONCURRENCY {
+            return Err(AppError::Config(format!(
+                "concurrency must not exceed {MAX_CONCURRENCY}, got {}",
+                self.concurrency
+            )));
         }
         if let (Some(start), Some(end)) = (self.start, self.end)
             && start > end
         {
             return Err(AppError::Config(format!(
                 "start {start} is after end {end}"
+            )));
+        }
+        self.symbol = self.symbol.iter().map(|s| s.to_ascii_uppercase()).collect();
+        if let Some(bad) = self.symbol.iter().find(|s| !is_valid_symbol(s)) {
+            return Err(AppError::Config(format!(
+                "invalid symbol: {bad:?} (expected ASCII letters, digits or underscore)"
             )));
         }
         self.symbol.sort();
@@ -89,13 +181,25 @@ impl AppConfig {
     }
 }
 
+/// Accepted symbol characters: ASCII uppercase letters, digits, and `_`
+/// (USDⓈ-M quarterly contracts use `_`, e.g. `BTCUSDT_250926`).
+///
+/// Validating locally turns typos into a clear config error instead of broken
+/// URLs, and keeps symbols safe as path components (no traversal via `..`).
+fn is_valid_symbol(symbol: &str) -> bool {
+    !symbol.is_empty()
+        && symbol
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 /// A download task: source URL, destination path and identifying metadata.
 #[derive(Debug, Clone)]
 pub struct DownloadTask {
     pub url: String,
     pub dest: PathBuf,
     pub pair: String,
-    pub timeframe: String,
+    pub timeframe: Timeframe,
 }
 
 #[cfg(test)]
@@ -128,7 +232,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.symbol, vec!["BTCUSDT", "ETHUSDT"]);
-        assert_eq!(cfg.timeframe, vec!["1d", "1m"]);
+        assert_eq!(cfg.timeframe, vec![Timeframe::M1, Timeframe::D1]);
         assert_eq!(
             cfg.start,
             Some(chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
@@ -145,7 +249,7 @@ mod tests {
     fn load_minimal_config() {
         let cfg = load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]").unwrap();
         assert_eq!(cfg.symbol, vec!["BTCUSDT"]);
-        assert_eq!(cfg.timeframe, vec!["1m"]);
+        assert_eq!(cfg.timeframe, vec![Timeframe::M1]);
         assert_eq!(cfg.start, None);
         assert_eq!(cfg.end, None);
         assert_eq!(cfg.output_dir, PathBuf::from("data"));
@@ -161,6 +265,13 @@ mod tests {
     fn zero_concurrency_fails() {
         let err =
             load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\nconcurrency = 0").unwrap_err();
+        assert!(err.to_string().contains("concurrency"));
+    }
+
+    #[test]
+    fn excessive_concurrency_fails() {
+        let err =
+            load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\nconcurrency = 4096").unwrap_err();
         assert!(err.to_string().contains("concurrency"));
     }
 
@@ -243,7 +354,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.symbol, vec!["BTCUSDT", "ETHUSDT"]);
-        assert_eq!(cfg.timeframe, vec!["1d", "1m"]);
+        assert_eq!(cfg.timeframe, vec![Timeframe::M1, Timeframe::D1]);
+    }
+
+    #[test]
+    fn timeframe_round_trip() {
+        for tf in Timeframe::ALL {
+            assert_eq!(tf.as_str().parse::<Timeframe>().unwrap(), tf);
+            assert_eq!(tf.to_string(), tf.as_str());
+        }
+        assert_eq!(Timeframe::ALL.len(), 12);
+        assert!("1y".parse::<Timeframe>().is_err());
+        assert!("15m".parse::<Timeframe>().unwrap() == Timeframe::M15);
+    }
+
+    #[test]
+    fn symbols_are_uppercased() {
+        let cfg = load("symbol = [\"btcusdt\", \"ethusdt\"]\ntimeframe = [\"1m\"]").unwrap();
+        assert_eq!(cfg.symbol, vec!["BTCUSDT", "ETHUSDT"]);
+    }
+
+    #[test]
+    fn digit_and_underscore_symbols_are_valid() {
+        let cfg =
+            load("symbol = [\"1000pepeusdt\", \"btcusdt_250926\"]\ntimeframe = [\"1m\"]").unwrap();
+        assert_eq!(cfg.symbol, vec!["1000PEPEUSDT", "BTCUSDT_250926"]);
+    }
+
+    #[test]
+    fn symbols_with_invalid_characters_fail() {
+        for sym in ["BTC/USDT", "../etc", "BTC USDT", ""] {
+            let err = load(&format!("symbol = [\"{sym}\"]\ntimeframe = [\"1m\"]")).unwrap_err();
+            assert!(
+                err.to_string().contains("symbol"),
+                "symbol {sym:?} slipped through"
+            );
+        }
     }
 
     #[test]
