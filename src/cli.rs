@@ -8,7 +8,3 @@ pub struct Cli {
     #[arg(short = 'c', long = "config")]
     pub config: PathBuf,
 }
-
-pub fn parse() -> Cli {
-    Cli::parse()
-}
