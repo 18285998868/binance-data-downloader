@@ -1,3 +1,5 @@
+//! Bounded-concurrency fan-out over download tasks, plus aggregate statistics.
+
 pub mod stream;
 
 use std::future::Future;
@@ -14,38 +16,66 @@ const MAX_LOGGED_FAILURES: usize = 20;
 
 /// Aggregate statistics for a completed batch of downloads.
 #[derive(Debug, Clone, Copy, Default)]
-/// Aggregate download statistics.
-pub struct DownloadStats {
+pub(crate) struct DownloadStats {
     /// Total number of tasks.
     pub total: usize,
     /// Successfully downloaded.
     pub ok: usize,
-    /// Files not found (404).
+    /// Files not found (404). Tolerated: never counted as a failure.
     pub not_found: usize,
     /// Failed downloads.
     pub failed: usize,
+    /// Downloads abandoned because the run was cancelled.
+    pub cancelled: usize,
+}
+
+/// A pair that failed *and* what it managed to do before failing.
+///
+/// Carrying the statistics alongside the error is what lets the batch totals
+/// stay accurate: a pair with 999 successes and 1 failure still reports 1000.
+#[derive(Debug)]
+pub(crate) struct DownloadFailure {
+    /// Statistics collected across the whole pair.
+    pub stats: DownloadStats,
+    /// Why the pair counts as failed.
+    pub error: AppError,
+}
+
+impl std::fmt::Display for DownloadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for DownloadFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
 }
 
 impl DownloadStats {
-    fn done(&self) -> usize {
-        self.ok + self.not_found + self.failed
+    /// Number of tasks that reached a terminal outcome.
+    pub(crate) fn done(&self) -> usize {
+        self.ok + self.not_found + self.failed + self.cancelled
     }
 
     /// Fold another batch's stats into this one.
-    pub fn absorb(&mut self, other: Self) {
+    pub(crate) fn absorb(&mut self, other: Self) {
         self.total += other.total;
         self.ok += other.ok;
         self.not_found += other.not_found;
         self.failed += other.failed;
+        self.cancelled += other.cancelled;
     }
 
     /// `not_found` as a percentage of `total` (0.0 when nothing ran).
     #[must_use]
-    pub fn not_found_pct(&self) -> f64 {
+    #[allow(clippy::cast_precision_loss)] // file counts stay far below 2^53
+    pub(crate) fn not_found_pct(&self) -> f64 {
         if self.total == 0 {
             0.0
         } else {
-            100.0 * self.not_found as f64 / self.total as f64
+            100.0 * (self.not_found as f64) / (self.total as f64)
         }
     }
 }
@@ -54,15 +84,19 @@ impl DownloadStats {
 ///
 /// # Errors
 ///
-/// Returns [`AppError::Data`] when one or more downloads fail (404s are
-/// tolerated and not counted as failures).
-pub async fn run_downloads(
+/// Returns [`DownloadFailure`] when one or more downloads fail (404s are
+/// tolerated and not counted as failures). The embedded stats are always
+/// populated, including on the error path.
+pub(crate) async fn run_downloads(
     client: &reqwest::Client,
     tasks: Vec<DownloadTask>,
     concurrency: usize,
-) -> Result<DownloadStats, AppError> {
-    let download_fn = move |c: reqwest::Client, t: DownloadTask| async move {
-        stream::download_to_file(&c, &t).await
+    cancel: &crate::cancel::CancelToken,
+) -> Result<DownloadStats, DownloadFailure> {
+    let cancel = cancel.clone();
+    let download_fn = move |c: reqwest::Client, t: DownloadTask| {
+        let cancel = cancel.clone();
+        async move { stream::download_to_file(&c, &t, &cancel).await }
     };
     run_downloads_inner(client, tasks, concurrency, download_fn).await
 }
@@ -77,10 +111,10 @@ async fn run_downloads_inner<F, Fut>(
     tasks: Vec<DownloadTask>,
     concurrency: usize,
     download_fn: F,
-) -> Result<DownloadStats, AppError>
+) -> Result<DownloadStats, DownloadFailure>
 where
-    F: Fn(reqwest::Client, DownloadTask) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<(), AppError>> + Send,
+    F: Fn(reqwest::Client, DownloadTask) -> Fut + Send,
+    Fut: Future<Output = Result<(), AppError>>,
 {
     let total = tasks.len();
     let concurrency = concurrency.max(1);
@@ -108,11 +142,17 @@ where
         match result {
             Ok(()) => stats.ok += 1,
             Err(AppError::NotFound { .. }) => stats.not_found += 1,
+            // Cancellation is not a failure: stop scheduling at once and let
+            // the remaining temp files be reclaimed by the next scan.
+            Err(AppError::Cancelled) => {
+                stats.cancelled += 1;
+                break;
+            }
             Err(e) => {
                 stats.failed += 1;
                 if logged_failures < MAX_LOGGED_FAILURES {
                     logged_failures += 1;
-                    tracing::warn!("download failed: {e}");
+                    tracing::warn!(error = %e, "download failed");
                 }
             }
         }
@@ -130,6 +170,9 @@ where
     }
 
     if stats.not_found > 0 {
+        // 404s are tolerated by design (a symbol is not listed on every day of
+        // the range, and today's archive is not published yet); they are
+        // reported, never treated as failure.
         tracing::warn!(
             not_found = stats.not_found,
             total = stats.total,
@@ -145,10 +188,13 @@ where
     }
 
     if stats.failed > 0 {
-        return Err(AppError::Data(format!(
-            "{} of {} downloads failed",
-            stats.failed, stats.total
-        )));
+        return Err(DownloadFailure {
+            stats,
+            error: AppError::Data(format!(
+                "{} of {} downloads failed",
+                stats.failed, stats.total
+            )),
+        });
     }
     Ok(stats)
 }
@@ -184,14 +230,14 @@ mod tests {
         let download_fn = move |_: reqwest::Client, _: DownloadTask| {
             let cnt = cnt.clone();
             async move {
-                cnt.fetch_add(1, Ordering::SeqCst);
+                cnt.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
         };
         let stats = run_downloads_inner(&client, tasks, 16, download_fn)
             .await
             .unwrap();
-        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+        assert_eq!(call_count.load(Ordering::Relaxed), 2);
         assert_eq!(stats.ok, 2);
         assert_eq!(stats.not_found, 0);
         assert_eq!(stats.failed, 0);
@@ -273,10 +319,10 @@ mod tests {
                 let active = active.clone();
                 let max_active = max_active.clone();
                 async move {
-                    let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    max_active.fetch_max(cur, Ordering::SeqCst);
+                    let cur = active.fetch_add(1, Ordering::Relaxed) + 1;
+                    max_active.fetch_max(cur, Ordering::Relaxed);
                     tokio::time::sleep(Duration::from_millis(5)).await;
-                    active.fetch_sub(1, Ordering::SeqCst);
+                    active.fetch_sub(1, Ordering::Relaxed);
                     Ok(())
                 }
             };
@@ -285,10 +331,80 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(stats.ok, 5);
-        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(max_active.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrency_limit_is_bounded_but_not_serialized() {
+        let client = reqwest::Client::new();
+        let tasks: Vec<_> = (0..16).map(|i| dummy_task(&format!("s{i}"))).collect();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let stats = {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            let download_fn = move |_: reqwest::Client, _: DownloadTask| {
+                let active = active.clone();
+                let max_active = max_active.clone();
+                async move {
+                    let cur = active.fetch_add(1, Ordering::Relaxed) + 1;
+                    max_active.fetch_max(cur, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    active.fetch_sub(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            };
+            run_downloads_inner(&client, tasks, 4, download_fn)
+                .await
+                .unwrap()
+        };
+        assert_eq!(stats.ok, 16);
+        assert!(
+            max_active.load(Ordering::Relaxed) <= 4,
+            "buffer_unordered must never exceed the concurrency limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_concurrency_is_clamped_to_one() {
+        let client = reqwest::Client::new();
+        let tasks: Vec<_> = (0..3).map(|i| dummy_task(&format!("s{i}"))).collect();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        run_downloads_inner(&client, tasks, 0, {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            move |_: reqwest::Client, _: DownloadTask| {
+                let active = active.clone();
+                let max_active = max_active.clone();
+                async move {
+                    let cur = active.fetch_add(1, Ordering::Relaxed) + 1;
+                    max_active.fetch_max(cur, Ordering::Relaxed);
+                    active.fetch_sub(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        // `concurrency.max(1)` keeps `buffer_unordered` from panicking.
+        assert_eq!(max_active.load(Ordering::Relaxed), 1);
     }
 
     // — DownloadStats —
+
+    #[test]
+    fn stats_done_sums_the_three_outcome_buckets() {
+        let stats = DownloadStats {
+            total: 9,
+            ok: 3,
+            not_found: 4,
+            failed: 2,
+            cancelled: 0,
+        };
+        assert_eq!(stats.done(), 9);
+        assert_eq!(DownloadStats::default().done(), 0);
+    }
 
     #[test]
     fn stats_absorb_sums_all_fields() {
@@ -297,12 +413,14 @@ mod tests {
             ok: 8,
             not_found: 1,
             failed: 1,
+            cancelled: 0,
         };
         a.absorb(DownloadStats {
             total: 5,
             ok: 5,
             not_found: 0,
             failed: 0,
+            cancelled: 0,
         });
         assert_eq!(a.total, 15);
         assert_eq!(a.ok, 13);
@@ -317,6 +435,7 @@ mod tests {
             ok: 15,
             not_found: 5,
             failed: 0,
+            cancelled: 0,
         };
         assert!((stats.not_found_pct() - 25.0).abs() < f64::EPSILON);
         assert_eq!(DownloadStats::default().not_found_pct(), 0.0);

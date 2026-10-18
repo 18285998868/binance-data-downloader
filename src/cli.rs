@@ -1,7 +1,10 @@
+//! Command-line interface: the `-c/--config` argument of the binary.
+
 use clap::Parser;
 use std::path::PathBuf;
 
-#[derive(Parser)]
+/// Command-line arguments accepted by the `binance-data-downloader` binary.
+#[derive(Debug, Clone, Parser)]
 #[command(name = "binance-data-downloader")]
 pub struct Cli {
     /// Path to the TOML configuration file.
@@ -24,5 +27,10 @@ mod tests {
     fn parses_long_config_flag() {
         let cli = Cli::try_parse_from(["app", "--config", "bar.toml"]).unwrap();
         assert_eq!(cli.config.to_str().unwrap(), "bar.toml");
+    }
+
+    #[test]
+    fn missing_config_flag_is_rejected() {
+        assert!(Cli::try_parse_from(["app"]).is_err());
     }
 }

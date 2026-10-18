@@ -2,240 +2,221 @@
 
 ## 项目目标
 
-> 从 [Binance Public Data](https://data.binance.vision/?prefix=data/futures/um/daily/klines/) 下载 永续合约 K 线数据文件(保持原始交易所文件格式)
-> 网站数据布局:
-
-- 网址: https://data.binance.vision
-  - futures/
-    - cm/
-    - um/
-      - daily/
-        - aggTrades/
-        - bookDepth/
-        - bookTicker/
-        - indexPriceKlines/
-        - klines/
-          - {symbol}/
-            - {timeframe}/
-              - {symbol}-{timeframe}-{yyyy-mm-dd}.zip
-        - markPriceKlines/
-        - metrics/
-        - premiumIndexKlines/
-        - trades/
-      - monthly/
-  - option/
-  - spot/
+> 从 [Binance Public Data](https://data.binance.vision/?prefix=data/futures/um/daily/klines/) 下载永续合约 K 线数据文件（保持原始交易所文件格式）
+>
+> 网址：https://data.binance.vision
+> - futures/
+>   - cm/
+>   - um/
+>     - daily/
+>       - aggTrades/
+>       - bookDepth/
+>       - bookTicker/
+>       - indexPriceKlines/
+>       - klines/
+>         - {symbol}/
+>           - {timeframe}/
+>             - {symbol}-{timeframe}-{yyyy-mm-dd}.zip
+>       - markPriceKlines/
+>       - metrics/
+>       - premiumIndexKlines/
+>       - trades/
+>       - monthly/
+>   - option/
+>   - spot/
 
 ## 技术选型
 
-- rust
-- edition = "2024"
+- rust，edition = "2024"，MSRV 1.88
+
+## 快速开始
+
+```bash
+cargo build --release
+RUST_LOG=info ./target/release/binance-data-downloader -c config.test.toml
+```
+
+- 日志走 `tracing`，由 `RUST_LOG` 控制（缺省 `info`）。
+- 已存在的 `.zip` 会跳过，因此**重复执行是安全的**，可用于增量补全。
+- 运行中 `Ctrl-C` 可随时中断，重跑即从中断处续传（详见 [中断语义](#中断与并发)）。
 
 ## 冒烟配置
 
 ```toml
 symbol = ["BTCUSDT"] # 必填，字符集 [A-Z0-9_]（自动转大写）
-timeframe = ["1d"] #  ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
+timeframe = ["1d"] # ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d"]
 # start = "2020-01-01" # 可选
 # end   = "2025-01-01" # 可选
-output_dir = "data" # 可选
+# output_dir = "data" # 可选
+# concurrency = 64 # 可选
 ```
 
-## 逻辑编排
-
-```
-main.rs         入口, 初始化 tracing, 解析参数 --config/-c 并将其传递给 app::run(&cli.config)
-app/            逻辑处理, 根据配置构建下载 urls -> 执行下载
-                1. 加载并校验配置
-                2. 扫描本地已有文件
-                3. 解析每个 symbol 的起始日期（缓存 30 天）
-                for symbol in config.normalized_symbols()
-                  for timeframe in config.timeframe
-                    构建从 start 到 end 的下载链接列表 urls
-                    过滤本地已存在文件，生成下载 tasks
-                    执行下载（有界并发 + 重试）
-                下载完成时, 打印汇总信息
-```
+完整字段说明见 `config.example.toml`。
 
 ## 架构设计
 
 ```
-main.rs    只做入口
-lib.rs     外观导出（run/Cli/AppError，模块内部私有）
-cli.rs     clap
-config.rs  toml 直解 + validate（原始输入保留，提供 normalized_symbols）
-error.rs   thiserror
-backoff.rs 重试策略与 Retry-After 处理
-cache.rs   redb 缓存
-start_date.rs Binance 首根 K 线日期获取与缓存
-scan.rs    本地文件扫描与孤儿 tmp 清理
+main.rs          入口：初始化 tracing、解析 -c/--config、调用 bdd::run()
+lib.rs           外观导出（run / Cli / AppError，其余模块私有）
+cli.rs           clap 参数
+config.rs        TOML 直解 + 校验 + 归一化（Timeframe / AppConfig / DownloadTask）
+error.rs         thiserror 错误类型 AppError
+backoff.rs       重试策略与 Retry-After 钳制
+cache.rs         redb 通用 KV 缓存（值带 8 字节时间戳）
+cancel.rs        取消信号（watch::Sender），pair 循环与在途下载共享
+lock.rs          输出目录单实例锁（O_EXCL + PID 存活性判定）
+scan.rs          本地文件扫描（分批流式）与孤儿 tmp 清理
+start_date.rs    币种首根 K 线日期获取与缓存（fapi + redb）
 app/
-  mod.rs   流水线编排
-  urls.rs  URL 生成
-  tasks.rs 下载任务构建
+  mod.rs         流水线编排
+  urls.rs        下载 URL 生成
+  tasks.rs       下载任务构建（剔除本地已有）
   download/
-    mod.rs 有界并发与统计
-    stream.rs 单文件下载、重试、原子落盘
+    mod.rs       有界并发扇出与统计
+    stream.rs    单文件下载、重试、内容校验、原子落盘
+tests/
+  public_api.rs  公开接口的集成测试
 ```
 
-## 实现
+### 可测试性
 
-### main.rs
+`ARCHIVE_BASE` 与 `FAPI_BASE` 是常量，但两者都以**参数形式**向下传递（`build_urls` /
+`build_download_tasks` / `get_first_kline_date`），汇聚到 `app::Endpoints`。
 
-- 初始化 tracing 日志
-- 传递参数并且调用 app::run()
+生产路径固定用 `Endpoints::live()`；`#[cfg(test)]` 的 `run_with_endpoints()` 把两个 base
+指向同一个 `wiremock` 服务，因此**编排逻辑全部可测，且不新增任何用户配置项**。
+`cancel` token 同样由 `run_inner` 接收，所以取消分支也能从测试触发。
 
-### app
+据此覆盖的编排分支：完整下载、404 容忍、永久下载失败、起始日降级（D4）、
+起始日不可解析、未知币种、取消中断（D3）、并发锁拒绝（D5）、
+`resolve_start_dates` 的成功/降级/失败三态归类。
 
-#### 加载配置&效验
-
-解析层（load:37-42 + 结构体属性）：
-
-1. 文件可读，失败带路径。
-2. TOML 可解析 + 日期格式 YYYY-MM-DD 合法，失败带路径。
-3. deny_unknown_fields：未知键拒收。
-   语义层（validate:52-88）：
-4. symbol 非空；字符集限大写字母/数字/下划线（转大写后校验，挡住拼错与路径穿越）。
-5. timeframe 非空。
-6. timeframe 由 `Timeframe` 枚举解析（12 值，非法即报错）。
-7. concurrency 校验 `0 < c ≤ 1024`。
-8. 双 Some 且 start>end 报错；另附归一化：双列表 sort+dedup。
-
-#### 建全局 reqwest Client（UA/连接 10s/读 60s/池 256）
-
-#### end 处理
-
-end=cfg.resolved_end(今天 UTC)（min(end,昨天)/缺省昨天；archive 按 UTC 分区）
-
-#### 并行获取 symbol x 1m 的开始时间
-
-#### 双层串行循环 symbol × timeframe
-
-逐 symbol 调 run_one；失败只记数+收明细（上限 20），不中断后续 symbol；pair 级连续 5 次失败则熔断中止（重跑续传）。
-
-##### run_one
-
-1. 143-154：cfg.start>end 直接 Ok 跳过（end 已是钳制后的，cfg.start 显式未来才触发）。
-2. 156：resolve_start 纯 max(cfg.start, sym_start)（sym_start 循环前按币取好传进来）。
-3. 158-167：resolved>end 再跳过（币上市晚于区间）。
-4. 177-184：build_download_tasks 逐日组 URL 并剔本地已有。
-5. 186-212：有任务则 download::run_downloads 并发下并打统计，空则 debug 跳过；client 参数只剩下载用。
-
-#### 打印汇总
-
-## 问题:
-
-- 当给的 config.start 早于币种最早开始时间时,会造成网络404,
-  - 解决: 按币取一次币种开始时间(`symbol x 1m`,经 fapi 首根 + redb 缓存 30 天,位置 `{output_dir}/.cache/`),下载起始取 max(币种开始时间,config.start)
-  - 位置: 循环前 `buffer_unordered(8)` 并行取全币种,循环内 `run_one` 只做纯 max,不再联网
-  - 文件: `src/utils/get_start_date.rs`, `src/utils/cache.rs`
-- 当给的 config.start 晚于结束时间时,会建空任务,
-  - 解决: 配置节双 Some 直接报错;运行时 `cfg.start>end` 跳过省 API,`resolved>end` 再跳过
-- 当给的 config.end 超过今天时,数据尚未更新(含今天),会造成网络404,
-  - 解决: `AppConfig::resolved_end` 一次性取 min(config.end, 昨天),下游只消费不再算时间
-- 当本地已经有下载的数据文件时,会导致重复下载
-  - 解决: 在循环开始前扫描本地已有文件一次(同遍清理本工具样式的 `.tmp`（`{name}.zip.{pid}.tmp`）, 活跃进程的除外), 在构建tasks 时剔除本地已有文件实现数据更新而不重复下载
-  - 文件: `src/utils/scan_local_files.rs`
-- 当遇到网络故障时
-  - 解决: 增加重试机制,确保数据下载成功;404 单次即止记容忍,不重试
-  - 文件: `src/utils/backoff.rs`
-- 当服务端 `Retry-After` 特别大时,单次重试会睡到超时之外
-  - 解决: `Retry-After` 钳制到剩余重试窗口(120s),窗口耗尽即硬停
-  - 文件: `src/utils/backoff.rs`
-- 当 404 集中出现时,会静默"成功"(exit 0),掩盖整批未下载
-  - 解决: pair 级与批量级 404 汇总升 WARN 并带比例(不改变退出码);下游 kline-reader 的 gap 检查兜底
-  - 文件: `src/app/03_download/mod.rs`, `src/app/mod.rs`
-- 当系统性故障(网络/限速)持续时,逐个 pair 重试会空转数小时
-  - 解决: 连续 5 个 pair 失败即中止本轮(熔断),重跑可续传
-  - 文件: `src/app/mod.rs`
-- 当 fapi 取首根失败时(限速/网络抖动),整组 symbol 会直接失败
-  - 解决: 瞬态失败且 `start` 已给 → 降级用 `start`(WARN)不判失败;未知币种(HTTP 400 `-1121`)仍硬失败 exit 1
-  - 文件: `src/app/mod.rs`, `src/utils/get_start_date.rs`
-- 当 `concurrency` 手滑写成极大值时,会并发风暴
-  - 解决: 校验 `0 < concurrency ≤ 1024`
-  - 文件: `src/config.rs`
-- 当配置写重复或写错时,会误下或空跑,
-  - 解决: `symbol/timeframe` 排序去重;报错带文件路径;未知键拒收(`deny_unknown_fields`)
-- 当缓存值损坏时,会让整个 pair 直接失败
-  - 解决: 损坏条目按未命中处理(告警并重取),不中断下载
-  - 文件: `src/utils/get_start_date.rs`
-
-## 完整架构
-
-```
-main.rs    只做入口
-lib.rs     外观导出（run/Cli/AppError，模块内部私有）
-cli.rs    clap
-config.rs toml 直解 + validate
-error.rs  thiserror
-app/
-  mod.rs app 执行逻辑代码实现
-  01_build_urls.rs
-  02_build_download_tasks.rs
-  03_download/ (mod.rs + stream.rs)
-utils/
-  mod.rs 聚合入口
-  get_start_date.rs
-  scan_local_files.rs
-  cache.rs (redb)
-  backoff.rs
-```
+> 设计取舍见「起始日按 `1m` 解析」一节——把 base 提为参数**不等于**按周期分别解析起始日，
+> D1 的取舍保持不变。
 
 ## 完整配置
 
 ```toml
 symbol = ["BTCUSDT"] # 必填，非空，字符集 [A-Z0-9_]（USDⓈ-M 季度合约形如 BTCUSDT_250926）；自动转大写并排序去重
-timeframe = ["1d"] # 必填，非空，`Timeframe` 枚举 12 值 ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d"]，自动排序去重
+timeframe = ["1d"] # 必填，非空，Timeframe 枚举 12 值 ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d"]，自动排序去重
 # start = "2020-01-01" # 可选，缺省=币种首日；与 end 双写且 start>end 直接报错
 # end = "2025-01-01" # 可选，缺省昨天；未来值截到昨天
 # output_dir = "data" # 可选，缺省 "data"；数据根目录，程序自动追加 binance/data/um/daily/klines/...，不要手写进去
-# concurrency = 64 # 可选，缺省 64；取值 `0 < c ≤ 1024`；单个 pair 内最大并发下载数
+# concurrency = 64 # 可选，缺省 64；取值 0 < c ≤ 1024；单个 pair 内的最大并发下载数
 ```
 
-- 未知键拒收（拼错即报错）；读写/解析失败带文件路径。
-- 完整示例见 `config.example.toml`。
+- 未知键拒收（`deny_unknown_fields`，拼错即报错）。
+- 所有配置错误都带配置文件路径（由 `AppError::Config.path` 承载，`Display` 只渲染一次）。
+- `concurrency` 只作用于**单个 pair 内部**；pair 与 pair 之间始终串行。
 
 ## 完整执行逻辑
 
-- main.rs
-  - 入口
-  - 初始化日志 tracing（`RUST_LOG`，缺省 info）
-  - 解析 `--config/-c` 参数给 `app::run()` 并调用它
-- cli.rs
-  - clap 4 derive 解析，`--config/-c` 必填，返回 `PathBuf`
-- config.rs
-  - `load`：读文件（失败带路径）→ `toml::from_str`（失败带路径）→ `validate`
-  - 缺省：容器级 `Default`（空列表/`data`/64/`None`）
-  - 校验：`symbol`/`timeframe` 非空，`symbol` 字符集 `[A-Z0-9_]`，`timeframe` 由 `Timeframe` 枚举解析（12 值），`concurrency` 满足 `0 < c ≤ 1024`，双 `Some` 且 `start>end` 报错，未知键拒收
-  - 归一化：`symbol` 转大写，双列表 `sort+dedup`
-  - `resolved_end(today)`：`min(end,昨天)`/缺省昨天，调用方以 UTC 今天算一次
-  - `DownloadTask{url, dest, pair, timeframe}` 定义在此
-- error.rs
-  - `AppError`（thiserror）：Config/Api/UnknownSymbol/Data/Date/Cache/Http/Io/Json/DownloadFailed/NotFound/Join
-- app/mod.rs
-  - 建全局 `reqwest Client`（UA/连接 10s/读 60s/池 256）
-  - 调 `utils::scan_local_files` 全量扫本地一次（得相对路径的 128-bit 哈希集合；同遍清理本工具样式的 `.tmp`（`{name}.zip.{pid}.tmp`），活跃进程的除外）
-  - `end = cfg.resolved_end(今天)`，打启动日志
-  - 循环前 `buffer_unordered(8)` 并行取全币种 `1m` 首根，收 `HashMap`；失败时：有 `start` 且非未知币种 → 降级用 `start`（WARN，`degraded` 计数），否则记 symbol 级失败并跳过整组
-  - 双层串行 `symbol×timeframe` 逐 pair 调 `run_one`，失败记数收明细（≤20 条）；连续 5 个 pair 失败即熔断中止本轮（重跑续传）
-  - 汇总：零失败 `Ok`；否则 `Err(Data(...))` 分别列出 symbol 级（start-date 解析失败）与 pair 级失败数及明细（≤20 条）；404 汇总（pair 级+批量级）以 WARN 带比例输出，不改变退出码
-  - `run_one`：`cfg.start>end` 跳过 → 纯 `max(cfg.start,sym_start)` → `resolved>end` 跳过 → 组 tasks → 非空并发下打统计，空则跳过
-- app/01_build_urls.rs
-  - `DownloadUrl{url, rel_path, pair, timeframe: Timeframe}`，逐日拼 `binance/data/um/daily/klines/{币}/{周期}/{币}-{周期}-{日期}.zip`，前缀 `https://data.binance.vision/data/`
-- app/02_build_download_tasks.rs
-  - 调 `build_urls`，过滤本地已有（相对路径），`dest = output_dir.join(rel)`，得 `Vec<DownloadTask>`；`debug_assert` rel_path 为纯相对路径（纵深防御，主防线是 symbol 字符集校验）
-- app/03_download/mod.rs
-  - `buffer_unordered(concurrency)` 有界并发，每 100 个打进度，统计 `ok/not_found/failed`，`failed>0` 返 `Err`
-- app/03_download/stream.rs
-  - 单文件：GET → 404 永久 `NotFound` 不重试 → 429/5xx/网络瞬态指数退避（120s 上限，优先 `Retry-After` 并钳制到剩余窗口）→ 其余 4xx 永久失败
-  - 校验 zip 头（`PK\x03\x04`）与 `Content-Length` → 建父目录 → 流式写 `{file}.{pid}.tmp` → `flush` → `rename` 原子落盘
-- utils/mod.rs
-  - 聚合入口：`backoff/cache/get_start_date/scan_local_files`
-- utils/scan_local_files.rs
-  - `spawn_blocking + walkdir` 遍历，得相对路径的 128-bit 哈希集合（同集存路径太占内存）；目录不存在返空；同遍清理本工具样式的 `.tmp`（跳过活跃进程的）
-- utils/get_start_date.rs
-  - `redb` 命中（TTL 30 天）直返，损坏条目按未命中处理（告警并重取），否则 `fapi klines?limit=1&startTime=0` 取首根写缓存；429/5xx 重试（优先 `Retry-After`），未知币种（HTTP 400 body `code=-1121`）→ `AppError::UnknownSymbol`，其余 4xx 永久 `Api`
-- utils/cache.rs
-  - `redb` 通用 KV（`{output_dir}/.cache/{domain}/`），实例化（`Cache::new(output_dir)`，无全局状态），值带 8 字节时间戳，读时判 TTL，坏库只 warn 不中断
-- utils/backoff.rs
-  - 指数退避，`max_elapsed_time = 120s`；`Retry-After` 钳制到剩余重试窗口
+1. **加载并校验配置** — 读文件 → `toml` 解析 → 校验（`symbol`/`timeframe` 非空、`symbol` 字符集 `[A-Z0-9_]`、`concurrency` 满足 `0 < c ≤ 1024`、双 `Some` 且 `start>end` 报错）。
+2. **取输出目录单实例锁**（`lock.rs`）— 已有活跃运行则直接失败退出（见 [中断与并发](#中断与并发)）。
+3. **建全局 `reqwest::Client`** — UA / 连接超时 10s / 读超时 60s / 连接池每 host 256。
+4. **扫描本地文件**（`scan.rs`）— 一次遍历，得到相对路径的 128-bit 哈希集合；同遍清理本工具样式的 `.tmp`（`{name}.zip.{pid}.tmp`）。
+5. **解析 `end`** — `min(config.end, 昨天)`，缺省昨天（archive 按 UTC 分区，所以用 UTC 今天）。
+6. **并发起始日期** — `buffer_unordered(8)`，每币一次 fapi 请求，结果按 `{symbol}:1m` 缓存 30 天。
+7. **双层串行循环 `symbol × timeframe`**，每个 pair：
+   1. `cfg.start > end` → 跳过；
+   2. 起始日 = `max(cfg.start, 币种首日)`；
+   3. 解析后起始日 `> end` → 跳过（币上市晚于区间）；
+   4. 逐日组 URL 并剔除本地已有，生成 tasks；
+   5. 非空则 `buffer_unordered(concurrency)` 并发下载，打印 pair 级统计。
+8. **汇总** — 零失败 `Ok`；否则 `Err(Data(...))`，分别列出 symbol 级与 pair 级失败数及明细（≤ 20 条）。
+
+## 关键设计决策
+
+### 起始日按 `1m` 解析，适用于全部周期（已知取舍）
+
+起始日只按 `Timeframe::M1` 查一次（fapi 的 klines 接口对各周期回答一致），
+循环内对所有周期复用。代价是**高周期归档的起始日可能晚于首根分钟线**，
+多出来的那些天必然 404。
+
+实测（BTCUSDT）：
+
+| 事实 | 值 |
+| --- | --- |
+| fapi 首根 `1m` K 线 | 2019-09-08 |
+| 首个存在的 `1d` 归档 | 2019-12-31 |
+| 2019-09-08 的 `1d` 归档 | HTTP 404 |
+
+一次实测运行（本地已有 2019-12-31 ～ 2026-10-16 的 `1d` 数据）生成了 115 个任务，
+其中 114 个是上述必然失败的日期，1 个是当天尚未发布的归档 —— 全部 404，退出码 0。
+
+这是**有意接受**的：按周期分别解析会把前置阶段的请求量从 N 次放大到 N×12，
+而多出来的 404 不影响数据正确性（见下节 404 语义），下游 `kline-reader` 另有 gap 检查兜底。
+
+### 404 语义：容忍，不改变退出码
+
+- 404 单次即止，不重试，计入 `not_found` 而**非**失败。
+- pair 级与批量级各打一条 WARN，带数量与占比。
+- 即使整批 100% 404，退出码仍为 0。
+
+理由：币种不是在区间内每天都上市（起始日之前必然 404），当天的归档尚未发布也必然 404。
+这两类是常态，不应与"网络故障"混为一谈。**若需要 CI 判定，请检查 WARN 日志中的 `pct`。**
+
+### 起始日获取失败的降级（不计入失败）
+
+| 情况 | 行为 |
+| --- | --- |
+| fapi 瞬态失败（限速 / 抖动），且配置给了 `start` | 降级用 `config.start`，逐币 WARN，汇总再打一条带币种列表的 WARN；**不计入失败，退出码 0** |
+| 币种未知（HTTP 400 且 body `code=-1121`） | 硬失败，该币种整组跳过，计入失败，退出码 1 |
+| fapi 失败且未配置 `start` | 无可退让，计入失败 |
+
+理由：降级是**可恢复**路径——程序确实继续下载了，只是最早几天可能缺失。
+把它算作失败会让"带告警地完成"和"真的坏了"无法区分，因此降级只告警，失败才 `exit != 0`。
+
+### 中断与并发
+
+**Ctrl-C**：一个取消信号同时被两处观察——
+
+- pair 循环顶部：不再调度新的 pair；
+- 每个在途下载：`tokio::select!` 竞速取消信号，立刻放弃请求。
+
+因此中断是**即时**的，不必等当前 pair（可达数千文件）跑完。实测 SIGINT 后 0 秒退出。
+取消不算失败：退出码 0，已落盘的文件有效，重跑即续传。
+被放弃的下载会留下 `{name}.zip.{pid}.tmp`，下次运行的扫描会清理
+（PID 已不存在且超过 5 分钟存活窗口）。
+
+**并发运行：当前禁止。** 同一 `output_dir` 上第二个进程会以退出码 1 失败，并打印
+持有锁的 PID。原因是它们会争抢同一个 `redb` 缓存文件（`Database::create` 会阻塞等文件锁），
+以及同一批目标文件。锁以 `O_EXCL` 创建，只有在持有者**可证明已消失**（Linux 上读 `/proc/<pid>`；
+否则退化为 mtime 超过 5 分钟）时才会被回收。
+多运行并发支持在后续版本提供。
+
+## 可靠性机制
+
+| 风险 | 处理 |
+| --- | --- |
+| `config.start` 早于币种上市日 → 大量 404 | 按币取一次首根日期（fapi + redb 缓存 30 天，位于 `{output_dir}/.cache/`），起始取 `max(币种首日, config.start)` |
+| `config.start` 晚于结束日 → 空任务 | 配置节双 `Some` 且 `start>end` 直接报错；运行时 `cfg.start>end` 与 `resolved>end` 两次跳过 |
+| `config.end` 超过今天 → 数据未发布 → 404 | `AppConfig::resolved_end` 一次取 `min(config.end, 昨天)`，下游只消费 |
+| 本地已有文件 → 重复下载 | 循环前扫描一次，建 task 时剔除，重复执行安全 |
+| 网络故障 | 指数退避重试，单文件总预算 120s |
+| 404 | 单次即止，记 `not_found`，不重试、不算失败 |
+| `Retry-After` 特别大 | 钳制到剩余重试窗口，窗口耗尽即硬停 |
+| 服务端 200 返回 HTML 错误页 | 校验 zip 魔数 `PK\x03\x04`（跨 chunk 累积校验），不符即重试 |
+| 响应体被截断 | 与 `Content-Length` 校验，不符即重试 |
+| 系统性故障持续 | 连续 5 个 pair 失败即熔断中止本轮，重跑续传 |
+| `concurrency` 手滑写成极大值 | 校验 `0 < concurrency ≤ 1024` |
+| 配置写重复或写错 | `symbol/timeframe` 排序去重；未知键拒收；错误带文件路径 |
+| 缓存值损坏 | 按未命中处理（WARN 并重取），不中断下载 |
+| 缓存读取失败 | 按未命中处理（WARN），不中断下载 |
+| 同目录并发运行 | 单实例锁，直接失败退出 |
+| 上次运行崩溃残留 `.tmp` | 扫描时按 PID + mtime 判定，回收死进程留下的 |
+
+## 开发
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+- `clippy` 启用了 `correctness/suspicious/style/complexity/perf` + `pedantic`，
+  并额外打开 `missing_docs`。
+- 内部 API 一律 `pub(crate)`，对外只暴露 `run` / `Cli` / `AppError`。
+- 测试覆盖：配置校验边界、URL/任务生成、缓存 TTL 与并发、扫描分批与 tmp 清理、
+  zip 魔数跨 chunk（自建 chunked HTTP 服务）、取消信号、重试与 `Retry-After` 钳制、
+  fapi 响应的各种畸形形态，以及整套编排分支（见「可测试性」）。

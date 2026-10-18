@@ -1,3 +1,5 @@
+//! Shared retry policy: the backoff schedule plus `Retry-After` handling.
+
 use backoff::ExponentialBackoff;
 
 /// Total wall-clock retry budget for a single operation.
@@ -10,11 +12,11 @@ use backoff::ExponentialBackoff;
 /// (`retry_after.or_else(|| backoff.next_backoff())`), ignoring
 /// `max_elapsed_time`: a server answering with `Retry-After` would otherwise
 /// retry forever, or sleep for as long as the header demands.
-pub const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+pub(crate) const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Exponential backoff capped at [`RETRY_WINDOW`] of total retry time.
 #[must_use]
-pub fn default_backoff() -> ExponentialBackoff {
+pub(crate) fn default_backoff() -> ExponentialBackoff {
     ExponentialBackoff {
         max_elapsed_time: Some(RETRY_WINDOW),
         ..Default::default()
@@ -25,7 +27,7 @@ pub fn default_backoff() -> ExponentialBackoff {
 ///
 /// HTTP-date values are ignored (mapped to `None`), so callers fall back to
 /// the regular backoff schedule.
-pub fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
+pub(crate) fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
     resp.headers()
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
@@ -45,7 +47,7 @@ pub fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration
 /// once the window is spent the next attempt short-circuits via the caller's
 /// deadline check.
 #[must_use]
-pub fn clamp_retry_after(
+pub(crate) fn clamp_retry_after(
     retry_after: Option<std::time::Duration>,
     deadline: std::time::Instant,
 ) -> Option<std::time::Duration> {
@@ -97,7 +99,9 @@ mod tests {
 
     #[test]
     fn clamp_retry_after_expired_deadline_yields_zero() {
-        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let deadline = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("monotonic clock is well past one second after boot");
         assert_eq!(
             clamp_retry_after(Some(std::time::Duration::from_secs(60)), deadline),
             Some(std::time::Duration::ZERO)

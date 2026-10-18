@@ -11,9 +11,9 @@ name = "bdd"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "signal"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-futures = "0.3"
+futures = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
@@ -31,12 +31,27 @@ tempfile = "3"
 wiremock = "0.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
 [lints.clippy]
-correctness = "deny"
-suspicious = "warn"
-style = "warn"
-complexity = "warn"
-perf = "warn"
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+
+# Selected rather than the whole group: the ones that catch real defects here
+# without pushing toward less readable code. `[lints.clippy]` enables the
+# `pedantic` group; individual lints below then tune it.
+pedantic = { level = "warn", priority = -1 }
+# `too_many_lines` fires on the pipeline and the scanner, which are long
+# because each step is sequential and commented, not because they sprawl.
+too_many_lines = "allow"
+module_name_repetitions = "allow"
+# `#[must_use]` is applied where it matters; the blanket is noise on accessors.
+must_use_candidate = "allow"
 
 [profile.release]
 lto = "fat"

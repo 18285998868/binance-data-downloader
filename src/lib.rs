@@ -4,8 +4,8 @@
 //! and saves as zip files.
 //!
 //! Module layout: `app/` holds the pipeline (`urls`, `tasks`,
-//! `download/`); supporting modules are `backoff`, `cache`,
-//! `start_date` and `scan`.
+//! `download/`); supporting modules are `backoff`, `cache`, `cancel`,
+//! `lock`, `start_date` and `scan`.
 //!
 //! The modules are an implementation detail; the public surface is
 //! [`run`], [`Cli`] and [`AppError`].
@@ -13,9 +13,11 @@
 mod app;
 mod backoff;
 mod cache;
+mod cancel;
 mod cli;
 mod config;
 mod error;
+mod lock;
 mod scan;
 mod start_date;
 
