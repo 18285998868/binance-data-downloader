@@ -1,9 +1,7 @@
-#[path = "02_build_download_tasks.rs"]
-pub mod build_download_tasks;
-#[path = "01_build_urls.rs"]
-pub mod build_urls;
 #[path = "03_download/mod.rs"]
 pub mod download;
+pub mod tasks;
+pub mod urls;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -27,8 +25,8 @@ use crate::config::{AppConfig, Timeframe};
 /// batch aborts early after a run of consecutive pair failures (likely a
 /// systemic outage) instead of retrying every remaining pair.
 pub async fn run(config_path: &Path) -> Result<(), AppError> {
-    let cfg = AppConfig::load(config_path)?;
-    let cache = crate::utils::cache::Cache::new(&cfg.output_dir);
+    let cfg = AppConfig::load(config_path).await?;
+    let cache = crate::cache::Cache::new(&cfg.output_dir);
 
     let client = reqwest::Client::builder()
         .user_agent("binance-data-downloader/0.1")
@@ -38,23 +36,23 @@ pub async fn run(config_path: &Path) -> Result<(), AppError> {
         .pool_idle_timeout(Duration::from_secs(30))
         .build()?;
 
-    let local = crate::utils::scan_local_files::scan_local_files(&cfg.output_dir).await?;
+    let local = crate::scan::scan_local_files(&cfg.output_dir).await?;
 
     let concurrency = cfg.concurrency;
     // The archive partitions days by UTC midnight, so "yesterday" must be UTC.
     let end = cfg.resolved_end(chrono::Utc::now().date_naive());
 
     tracing::info!(
-        symbols = cfg.symbol.len(),
+        symbols = cfg.normalized_symbols().len(),
         timeframes = cfg.timeframe.len(),
-        total = cfg.symbol.len() * cfg.timeframe.len(),
+        total = cfg.normalized_symbols().len() * cfg.timeframe.len(),
         concurrency,
         "starting batch download",
     );
 
     if cfg.start.is_none() {
         tracing::info!(
-            count = cfg.symbol.len(),
+            count = cfg.normalized_symbols().len(),
             "first start-date per symbol is resolved by an individual request to the \
              Binance API and cached for 30 days; this can take a while on a fresh run",
         );
@@ -72,19 +70,14 @@ pub async fn run(config_path: &Path) -> Result<(), AppError> {
     let sym_starts: HashMap<String, chrono::NaiveDate> = {
         let cache = &cache;
         let mut map = HashMap::new();
-        let mut pending = stream_iter(cfg.symbol.iter().map(|sym| {
+        let mut pending = stream_iter(cfg.normalized_symbols().into_iter().map(|sym| {
             let c = client.clone();
             let s = sym.clone();
             async move {
                 (
                     s.clone(),
-                    crate::utils::get_start_date::get_first_kline_date(
-                        &c,
-                        cache,
-                        &s,
-                        Timeframe::M1.as_str(),
-                    )
-                    .await,
+                    crate::start_date::get_first_kline_date(&c, cache, &s, Timeframe::M1.as_str())
+                        .await,
                 )
             }
         }))
@@ -118,12 +111,12 @@ pub async fn run(config_path: &Path) -> Result<(), AppError> {
     tracing::info!(
         resolved = sym_starts.len(),
         degraded = degraded_start_dates,
-        total = cfg.symbol.len(),
+        total = cfg.normalized_symbols().len(),
         "start-dates resolved",
     );
 
-    'pairs: for symbol in &cfg.symbol {
-        let Some(sym_start) = sym_starts.get(symbol) else {
+    'pairs: for symbol in cfg.normalized_symbols() {
+        let Some(sym_start) = sym_starts.get(&symbol) else {
             continue;
         };
         for timeframe in &cfg.timeframe {
@@ -134,7 +127,7 @@ pub async fn run(config_path: &Path) -> Result<(), AppError> {
                 cfg: &cfg,
                 local: &local,
             };
-            match run_one(&client, symbol, *timeframe, &ctx).await {
+            match run_one(&client, &symbol, *timeframe, &ctx).await {
                 Ok(stats) => {
                     tracker.record_success();
                     totals.absorb(stats);
@@ -167,7 +160,7 @@ pub async fn run(config_path: &Path) -> Result<(), AppError> {
         );
     }
 
-    let total_failures = failed_start_dates + failed_pairs;
+    let total_failures = failed_start_dates + degraded_start_dates + failed_pairs;
     if total_failures == 0 {
         tracing::info!("batch download complete");
         Ok(())
@@ -182,6 +175,16 @@ pub async fn run(config_path: &Path) -> Result<(), AppError> {
             causes.push(format!(
                 "{failed_start_dates} symbol(s) failed start-date resolution"
             ));
+        }
+        if degraded_start_dates > 0 {
+            causes.push(format!(
+                "{degraded_start_dates} symbol(s) degraded to config start date"
+            ));
+            if errors.len() < MAX_BATCH_ERRORS {
+                errors.push(format!(
+                    "{degraded_start_dates} symbol(s) degraded to config start date"
+                ));
+            }
         }
         if failed_pairs > 0 {
             causes.push(format!("{failed_pairs} pair(s) failed"));
@@ -297,7 +300,7 @@ async fn run_one(
         "processing symbol-timeframe pair",
     );
 
-    let tasks = build_download_tasks::build_download_tasks(
+    let tasks = tasks::build_download_tasks(
         symbol,
         timeframe,
         start,

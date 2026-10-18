@@ -79,30 +79,26 @@ fn is_our_tmp(rel: &str) -> bool {
     stem.ends_with(".zip") && !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Returns true when a `.tmp` file may belong to an in-flight download of a
-/// still-running process, judging by its `.{pid}.tmp` suffix.
+/// Returns true when a `.tmp` file looks like an in-flight download of a
+/// still-running process, judging by its recent modification time.
 ///
-/// Such files must not be deleted: a second run against the same output
-/// directory would otherwise break the first run's atomic rename.
+/// PID-based liveness checks are platform-specific and vulnerable to PID reuse,
+/// so we treat any tmp file modified within the last few minutes as potentially
+/// live and leave it untouched. Older tmp files are considered stale (the
+/// writer crashed or finished) and may be removed by the caller.
+const LIVE_TMP_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 fn belongs_to_live_process(path: &Path) -> bool {
-    let Some(pid) = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| n.strip_suffix(".tmp"))
-        .and_then(|s| s.rsplit('.').next())
-        .and_then(|p| p.parse::<u32>().ok())
-    else {
+    let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
-    #[cfg(target_os = "linux")]
-    {
-        Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        false
-    }
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    modified
+        .elapsed()
+        .map(|age| age < LIVE_TMP_WINDOW)
+        .unwrap_or(false)
 }
 
 /// Hash of a relative path as stored in the scanned file set.
@@ -202,9 +198,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("binance/data/um/daily/klines/BTCUSDT/1m");
         std::fs::create_dir_all(&data).unwrap();
-        // PID 0 (backed by no process) stands in for a dead writer.
+        // Age the tmp file beyond the liveness window so it is treated as stale.
         let stale = data.join("BTCUSDT-1m-2024-01-01.zip.0.tmp");
         std::fs::write(&stale, b"stale").unwrap();
+        let f = std::fs::File::open(&stale).unwrap();
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 60);
+        f.set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+        drop(f);
         let files = scan_local_files(dir.path()).await.unwrap();
         assert!(files.is_empty());
         assert!(!stale.exists());

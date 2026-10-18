@@ -2,8 +2,8 @@ use backoff::Error as BackoffError;
 use backoff::future::retry;
 
 use crate::AppError;
-use crate::utils::backoff::{RETRY_WINDOW, clamp_retry_after, default_backoff, parse_retry_after};
-use crate::utils::cache::Cache;
+use crate::backoff::{RETRY_WINDOW, clamp_retry_after, default_backoff, parse_retry_after};
+use crate::cache::Cache;
 
 const CACHE_DOMAIN: &str = "start_date";
 /// Cached first-kline dates are considered stale after 30 days.
@@ -40,22 +40,30 @@ pub async fn get_first_kline_date(
     timeframe: &str,
 ) -> Result<chrono::NaiveDate, AppError> {
     let key = format!("{symbol}:{timeframe}");
-    if let Some(cached) = cache.read(CACHE_DOMAIN, &key, Some(CACHE_TTL_SECS)) {
-        match parse_cached_date(&cached) {
+    match cache
+        .read_async(CACHE_DOMAIN, &key, Some(CACHE_TTL_SECS))
+        .await
+    {
+        Ok(Some(cached)) => match parse_cached_date(&cached) {
             Some(date) => return Ok(date),
             None => tracing::warn!(
                 symbol,
                 timeframe,
                 "ignoring unreadable cached start date, refetching",
             ),
-        }
+        },
+        Ok(None) => {}
+        Err(e) => return Err(e),
     }
     let date = fetch_first_kline(client, FAPI_BASE, symbol, timeframe).await?;
-    if let Err(e) = cache.write(
-        CACHE_DOMAIN,
-        &key,
-        date.format("%Y-%m-%d").to_string().as_bytes(),
-    ) {
+    if let Err(e) = cache
+        .write_async(
+            CACHE_DOMAIN,
+            &key,
+            date.format("%Y-%m-%d").to_string().as_bytes(),
+        )
+        .await
+    {
         tracing::warn!(symbol, timeframe, "failed to cache start date: {e}");
     }
     Ok(date)

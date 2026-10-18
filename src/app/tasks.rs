@@ -1,14 +1,14 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use super::build_urls::build_urls;
+use super::urls::build_urls;
 use crate::config::{DownloadTask, Timeframe};
-use crate::utils::scan_local_files::rel_path_hash;
+use crate::scan::rel_path_hash;
 
 /// Build a list of [`DownloadTask`]s for a date range, skipping locally-present files.
 ///
 /// `local` holds 128-bit [`rel_path_hash`]es of the files found by
-/// [`crate::utils::scan_local_files::scan_local_files`].
+/// [`crate::scan::scan_local_files`].
 #[must_use]
 pub fn build_download_tasks(
     symbol: &str,

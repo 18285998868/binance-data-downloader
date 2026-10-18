@@ -14,10 +14,15 @@ const MAX_LOGGED_FAILURES: usize = 20;
 
 /// Aggregate statistics for a completed batch of downloads.
 #[derive(Debug, Clone, Copy, Default)]
+/// Aggregate download statistics.
 pub struct DownloadStats {
+    /// Total number of tasks.
     pub total: usize,
+    /// Successfully downloaded.
     pub ok: usize,
+    /// Files not found (404).
     pub not_found: usize,
+    /// Failed downloads.
     pub failed: usize,
 }
 

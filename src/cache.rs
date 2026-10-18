@@ -13,9 +13,10 @@ const TABLE: TableDefinition<&str, Vec<u8>> = TableDefinition::new("data");
 /// One instance per run, created in `app::run`; databases are opened lazily
 /// per domain and shared through the instance. No global state, so tests are
 /// independent and parallel-safe.
+#[derive(Clone)]
 pub struct Cache {
     base: PathBuf,
-    dbs: Mutex<HashMap<String, Arc<Database>>>,
+    dbs: Arc<Mutex<HashMap<String, Arc<Database>>>>,
 }
 
 impl Cache {
@@ -24,7 +25,7 @@ impl Cache {
     pub fn new(output_dir: &Path) -> Self {
         Self {
             base: output_dir.join(".cache"),
-            dbs: Mutex::new(HashMap::new()),
+            dbs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -52,51 +53,40 @@ impl Cache {
     }
 }
 
-macro_rules! log_none {
-    ($expr:expr, $domain:expr, $msg:expr) => {
-        match $expr {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(domain = $domain, error = %e, "{}", $msg);
-                return None;
-            }
-        }
-    };
-    ($expr:expr, $domain:expr, $key:expr, $msg:expr) => {
-        match $expr {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(domain = $domain, key = $key, error = %e, "{}", $msg);
-                return None;
-            }
-        }
-    };
-}
-
 impl Cache {
     /// Read `key` from `domain`.
     ///
-    /// Returns `None` when the entry is missing, expired, or the cache is
-    /// unreadable (logged as a warning, never fatal).
-    #[must_use]
-    pub fn read(&self, domain: &str, key: &str, ttl_secs: Option<u64>) -> Option<Vec<u8>> {
-        let db = match self.ensure_db(domain) {
-            Ok(db) => db,
-            Err(e) => {
-                tracing::warn!(domain, "cache read ensure_db failed: {e}");
-                return None;
-            }
+    /// Returns `Ok(None)` when the entry is missing or expired. Returns
+    /// `Err` when the cache cannot be opened or read, so callers can
+    /// distinguish a miss from a cache failure.
+    pub fn read(
+        &self,
+        domain: &str,
+        key: &str,
+        ttl_secs: Option<u64>,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        let db = self.ensure_db(domain)?;
+        let read_tx = db
+            .begin_read()
+            .map_err(|e| AppError::Cache(e.to_string()))?;
+        let table = match read_tx.open_table(TABLE) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
         };
-        let read_tx = log_none!(db.begin_read(), domain, "cache read begin_read");
-        let table = log_none!(read_tx.open_table(TABLE), domain, "cache read open_table");
-        let guard = log_none!(table.get(key), domain, key, "cache read get")?;
+        let guard = match table.get(key).map_err(|e| AppError::Cache(e.to_string()))? {
+            Some(g) => g,
+            None => return Ok(None),
+        };
         let raw = guard.value();
 
         if raw.len() < 8 {
-            return None;
+            return Ok(None);
         }
         let (ts_bytes, data) = raw.split_at(8);
-        let cached_at = u64::from_le_bytes(ts_bytes.try_into().ok()?);
+        let Ok(ts_arr) = ts_bytes.try_into() else {
+            return Ok(None);
+        };
+        let cached_at = u64::from_le_bytes(ts_arr);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -105,9 +95,9 @@ impl Cache {
             && cached_at + ttl <= now
         {
             tracing::debug!(domain, key, "cache entry expired");
-            return None;
+            return Ok(None);
         }
-        Some(data.to_vec())
+        Ok(Some(data.to_vec()))
     }
 
     /// Store `data` under `key`, stamped with the current UNIX time.
@@ -143,6 +133,32 @@ impl Cache {
             .map_err(|e| AppError::Cache(e.to_string()))?;
         Ok(())
     }
+
+    /// Async wrapper around [`Self::read`] for use in async contexts.
+    pub async fn read_async(
+        &self,
+        domain: &str,
+        key: &str,
+        ttl_secs: Option<u64>,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        let this = self.clone();
+        let domain = domain.to_owned();
+        let key = key.to_owned();
+        tokio::task::spawn_blocking(move || this.read(&domain, &key, ttl_secs))
+            .await
+            .map_err(|e| AppError::Cache(format!("join error: {e}")))?
+    }
+
+    /// Async wrapper around [`Self::write`] for use in async contexts.
+    pub async fn write_async(&self, domain: &str, key: &str, data: &[u8]) -> Result<(), AppError> {
+        let this = self.clone();
+        let domain = domain.to_owned();
+        let key = key.to_owned();
+        let data = data.to_vec();
+        tokio::task::spawn_blocking(move || this.write(&domain, &key, &data))
+            .await
+            .map_err(|e| AppError::Cache(format!("join error: {e}")))?
+    }
 }
 
 #[cfg(test)]
@@ -160,7 +176,7 @@ mod tests {
         let (_dir, cache) = temp_cache();
         cache.write("test_domain", "key1", b"hello").unwrap();
         assert_eq!(
-            cache.read("test_domain", "key1", None),
+            cache.read("test_domain", "key1", None).unwrap(),
             Some(b"hello".to_vec())
         );
     }
@@ -168,7 +184,10 @@ mod tests {
     #[test]
     fn read_missing_key() {
         let (_dir, cache) = temp_cache();
-        assert_eq!(cache.read("test_domain", "nonexistent", None), None);
+        assert_eq!(
+            cache.read("test_domain", "nonexistent", None).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -176,6 +195,6 @@ mod tests {
         let (_dir, cache) = temp_cache();
         cache.write("test_domain", "key1", b"data").unwrap();
         // TTL = 0 → immediately expired
-        assert_eq!(cache.read("test_domain", "key1", Some(0)), None);
+        assert_eq!(cache.read("test_domain", "key1", Some(0)).unwrap(), None);
     }
 }

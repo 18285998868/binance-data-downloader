@@ -3,18 +3,21 @@
 //! Downloads historical kline data from Binance's public data archive
 //! and saves as zip files.
 //!
-//! Module layout: `app/` holds the naive pipeline (`01_build_urls`,
-//! `02_build_download_tasks`, `03_download/`); patches live in `utils/`
-//! (`get_start_date`, `scan_local_files`, `cache`, `backoff`).
+//! Module layout: `app/` holds the pipeline (`urls`, `tasks`,
+//! `download/`); supporting modules are `backoff`, `cache`,
+//! `start_date` and `scan`.
 //!
 //! The modules are an implementation detail; the public surface is
 //! [`run`], [`Cli`] and [`AppError`].
 
 mod app;
+mod backoff;
+mod cache;
 mod cli;
 mod config;
 mod error;
-mod utils;
+mod scan;
+mod start_date;
 
 pub use app::run;
 pub use cli::Cli;

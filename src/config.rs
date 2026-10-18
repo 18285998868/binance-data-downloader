@@ -6,18 +6,31 @@ use crate::AppError;
 
 /// Binance kline interval, matching the archive's directory/interval names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Binance kline interval.
 pub enum Timeframe {
+    /// 1-minute klines.
     M1,
+    /// 3-minute klines.
     M3,
+    /// 5-minute klines.
     M5,
+    /// 15-minute klines.
     M15,
+    /// 30-minute klines.
     M30,
+    /// 1-hour klines.
     H1,
+    /// 2-hour klines.
     H2,
+    /// 4-hour klines.
     H4,
+    /// 6-hour klines.
     H6,
+    /// 8-hour klines.
     H8,
+    /// 12-hour klines.
     H12,
+    /// 1-day klines.
     D1,
 }
 
@@ -88,12 +101,19 @@ impl<'de> Deserialize<'de> for Timeframe {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// Application configuration.
 pub struct AppConfig {
+    /// Symbols to download (uppercased, sorted, deduplicated).
     pub symbol: Vec<String>,
+    /// Timeframes to download.
     pub timeframe: Vec<Timeframe>,
+    /// Optional inclusive start date override.
     pub start: Option<chrono::NaiveDate>,
+    /// Optional inclusive end date override.
     pub end: Option<chrono::NaiveDate>,
+    /// Output directory for downloaded files.
     pub output_dir: PathBuf,
+    /// Maximum concurrent downloads.
     pub concurrency: usize,
 }
 
@@ -122,10 +142,16 @@ impl AppConfig {
     ///
     /// Returns [`AppError::Config`] when the file cannot be read, the TOML is
     /// invalid, or validation fails.
-    pub fn load(path: &Path) -> Result<Self, AppError> {
-        let raw = std::fs::read_to_string(path)
+    /// Load and validate configuration from a TOML file.
+    pub async fn load(path: &Path) -> Result<Self, AppError> {
+        let raw = tokio::fs::read_to_string(path)
+            .await
             .map_err(|e| AppError::Config(format!("{}: {e}", path.display())))?;
-        let cfg: Self = toml::from_str(&raw)
+        Self::parse_str(&raw, path)
+    }
+
+    fn parse_str(raw: &str, path: &Path) -> Result<Self, AppError> {
+        let cfg: Self = toml::from_str(raw)
             .map_err(|e| AppError::Config(format!("{}: {e}", path.display())))?;
         cfg.validate()
     }
@@ -136,6 +162,15 @@ impl AppConfig {
     pub fn resolved_end(&self, today: chrono::NaiveDate) -> chrono::NaiveDate {
         let yesterday = today - chrono::Duration::days(1);
         self.end.map_or(yesterday, |e| e.min(yesterday))
+    }
+
+    /// Normalized symbols: uppercased, sorted and deduplicated.
+    #[must_use]
+    pub fn normalized_symbols(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.symbol.iter().map(|s| s.to_ascii_uppercase()).collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     fn validate(mut self) -> Result<Self, AppError> {
@@ -167,14 +202,15 @@ impl AppConfig {
                 "start {start} is after end {end}"
             )));
         }
-        self.symbol = self.symbol.iter().map(|s| s.to_ascii_uppercase()).collect();
-        if let Some(bad) = self.symbol.iter().find(|s| !is_valid_symbol(s)) {
+        if let Some(bad) = self
+            .symbol
+            .iter()
+            .find(|s| !is_valid_symbol(&s.to_ascii_uppercase()))
+        {
             return Err(AppError::Config(format!(
                 "invalid symbol: {bad:?} (expected ASCII letters, digits or underscore)"
             )));
         }
-        self.symbol.sort();
-        self.symbol.dedup();
         self.timeframe.sort();
         self.timeframe.dedup();
         Ok(self)
@@ -195,10 +231,15 @@ fn is_valid_symbol(symbol: &str) -> bool {
 
 /// A download task: source URL, destination path and identifying metadata.
 #[derive(Debug, Clone)]
+/// A download task.
 pub struct DownloadTask {
+    /// Source URL.
     pub url: String,
+    /// Destination path on disk.
     pub dest: PathBuf,
+    /// Trading pair symbol.
     pub pair: String,
+    /// Kline timeframe.
     pub timeframe: Timeframe,
 }
 
@@ -218,7 +259,8 @@ mod tests {
 
     fn load(contents: &str) -> Result<AppConfig, AppError> {
         let (_dir, path) = write_config(contents);
-        AppConfig::load(&path)
+        let raw = std::fs::read_to_string(&path).unwrap();
+        AppConfig::parse_str(&raw, &path)
     }
 
     #[test]
@@ -232,6 +274,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.symbol, vec!["BTCUSDT", "ETHUSDT"]);
+        assert_eq!(cfg.normalized_symbols(), vec!["BTCUSDT", "ETHUSDT"]);
         assert_eq!(cfg.timeframe, vec![Timeframe::M1, Timeframe::D1]);
         assert_eq!(
             cfg.start,
@@ -353,7 +396,8 @@ mod tests {
             "symbol = [\"ETHUSDT\", \"BTCUSDT\", \"ETHUSDT\"]\ntimeframe = [\"1d\", \"1m\", \"1m\"]",
         )
         .unwrap();
-        assert_eq!(cfg.symbol, vec!["BTCUSDT", "ETHUSDT"]);
+        assert_eq!(cfg.symbol, vec!["ETHUSDT", "BTCUSDT", "ETHUSDT"]);
+        assert_eq!(cfg.normalized_symbols(), vec!["BTCUSDT", "ETHUSDT"]);
         assert_eq!(cfg.timeframe, vec![Timeframe::M1, Timeframe::D1]);
     }
 
@@ -371,14 +415,19 @@ mod tests {
     #[test]
     fn symbols_are_uppercased() {
         let cfg = load("symbol = [\"btcusdt\", \"ethusdt\"]\ntimeframe = [\"1m\"]").unwrap();
-        assert_eq!(cfg.symbol, vec!["BTCUSDT", "ETHUSDT"]);
+        assert_eq!(cfg.symbol, vec!["btcusdt", "ethusdt"]);
+        assert_eq!(cfg.normalized_symbols(), vec!["BTCUSDT", "ETHUSDT"]);
     }
 
     #[test]
     fn digit_and_underscore_symbols_are_valid() {
         let cfg =
             load("symbol = [\"1000pepeusdt\", \"btcusdt_250926\"]\ntimeframe = [\"1m\"]").unwrap();
-        assert_eq!(cfg.symbol, vec!["1000PEPEUSDT", "BTCUSDT_250926"]);
+        assert_eq!(cfg.symbol, vec!["1000pepeusdt", "btcusdt_250926"]);
+        assert_eq!(
+            cfg.normalized_symbols(),
+            vec!["1000PEPEUSDT", "BTCUSDT_250926"]
+        );
     }
 
     #[test]
@@ -392,8 +441,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn nonexistent_path_fails() {
-        assert!(AppConfig::load(Path::new("/nonexistent/config.toml")).is_err());
+    #[tokio::test]
+    async fn nonexistent_path_fails() {
+        assert!(
+            AppConfig::load(Path::new("/nonexistent/config.toml"))
+                .await
+                .is_err()
+        );
     }
 }

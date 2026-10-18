@@ -2,10 +2,15 @@ use crate::config::Timeframe;
 
 /// A download URL with its relative storage path and metadata.
 #[derive(Debug)]
+/// A download URL with metadata.
 pub struct DownloadUrl {
+    /// Full download URL.
     pub url: String,
+    /// Relative storage path.
     pub rel_path: String,
+    /// Trading pair symbol.
     pub pair: String,
+    /// Kline timeframe.
     pub timeframe: Timeframe,
 }
 
