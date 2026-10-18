@@ -44,17 +44,17 @@ output_dir = "data" # 可选
 ## 逻辑编排
 
 ```
-main.rs         入口, 初始化tracing, 解析参数 --config/-c 并将其传递给 app::(&cli.config)
+main.rs         入口, 初始化 tracing, 解析参数 --config/-c 并将其传递给 app::run(&cli.config)
 app/            逻辑处理, 根据配置构建下载 urls -> 执行下载
-                01加载配置
-                for symbol in config.symbol
+                1. 加载并校验配置
+                2. 扫描本地已有文件
+                3. 解析每个 symbol 的起始日期（缓存 30 天）
+                for symbol in config.normalized_symbols()
                   for timeframe in config.timeframe
-                    构建从 config.start 到 config.end 的下载链接列表 urls,格式: data/futures/um/daily/klines/{symbol}/{timeframe}/{symbol}-{timeframe}-{YYYY-MM-DD}.zip
-                    从下载链接列表构建下载 tasks : 将 urls 的每一个加上前缀 https://data.binance.vision/ 构建真正的下载链接列表
-                    执行下载
-                下载完成时,打印汇总信息
-
-
+                    构建从 start 到 end 的下载链接列表 urls
+                    过滤本地已存在文件，生成下载 tasks
+                    执行下载（有界并发 + 重试）
+                下载完成时, 打印汇总信息
 ```
 
 ## 架构设计
@@ -62,15 +62,20 @@ app/            逻辑处理, 根据配置构建下载 urls -> 执行下载
 ```
 main.rs    只做入口
 lib.rs     外观导出（run/Cli/AppError，模块内部私有）
-cli.rs    clap
-config.rs toml 直解 + validate
-error.rs  thiserror
+cli.rs     clap
+config.rs  toml 直解 + validate（原始输入保留，提供 normalized_symbols）
+error.rs   thiserror
+backoff.rs 重试策略与 Retry-After 处理
+cache.rs   redb 缓存
+start_date.rs Binance 首根 K 线日期获取与缓存
+scan.rs    本地文件扫描与孤儿 tmp 清理
 app/
-  mod.rs app 执行逻辑代码实现
-  01_build_urls.rs
-  02_build_download_tasks.rs
-  03_download/ (mod.rs + stream.rs)
-
+  mod.rs   流水线编排
+  urls.rs  URL 生成
+  tasks.rs 下载任务构建
+  download/
+    mod.rs 有界并发与统计
+    stream.rs 单文件下载、重试、原子落盘
 ```
 
 ## 实现
