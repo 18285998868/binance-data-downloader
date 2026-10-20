@@ -14,6 +14,7 @@ timeframe = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h"
 # end = "2025-01-01" # 结束时间, 可选, 默认值: 昨天, 可选参数: YYYY-MM-DD
 # output_dir = "data" # 数据根目录(不含 binance/data/um/daily/klines), 可选, 默认值: "data", 可选参数: 任意目录路径
 # concurrency = 64 # 每个 (symbol × timeframe) 配对内的最大并发下载数, 可选, 默认值: 64, 可选参数: 正整数(0 < c ≤ 1024)
+# not_found_pct_threshold = 50.0 # 本轮 404 占比阈值(百分比), 可选, 默认值: 无(=404 永不改变退出码), 可选参数: 0 < t ≤ 100
 
 # 完整示例: 8 币 × 12 周期补全到最新
 # symbol = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "LINKUSDT"]

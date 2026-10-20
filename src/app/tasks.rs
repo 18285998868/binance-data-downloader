@@ -22,7 +22,6 @@ pub(crate) fn build_download_tasks(
     data_dir: &Path,
 ) -> Vec<DownloadTask> {
     build_urls(archive_base, symbol, timeframe, start, end)
-        .into_iter()
         .filter(|dl| !local.contains_rel_path(&dl.rel_path))
         .map(|dl| {
             // Defense in depth: `build_urls` only emits plain relative paths
@@ -38,7 +37,7 @@ pub(crate) fn build_download_tasks(
             DownloadTask {
                 url: dl.url,
                 dest: data_dir.join(&dl.rel_path),
-                pair: dl.pair,
+                pair: dl.pair.to_owned(),
                 timeframe: dl.timeframe,
             }
         })

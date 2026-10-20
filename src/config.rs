@@ -108,7 +108,11 @@ impl<'de> Deserialize<'de> for Timeframe {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct AppConfig {
-    /// Symbols to download (uppercased, sorted, deduplicated).
+    /// Symbols to download, kept **verbatim** as the user wrote them.
+    ///
+    /// The uppercased / sorted / deduplicated view is produced on demand by
+    /// [`AppConfig::normalized_symbols`]; the raw value is kept so validation
+    /// errors can quote exactly what the user typed.
     pub symbol: Vec<String>,
     /// Timeframes to download.
     pub timeframe: Vec<Timeframe>,
@@ -120,6 +124,13 @@ pub(crate) struct AppConfig {
     pub output_dir: PathBuf,
     /// Maximum concurrent downloads.
     pub concurrency: usize,
+    /// Optional threshold on the share of files the server did not have, in
+    /// percent (`0 < t ≤ 100`).
+    ///
+    /// When the run's not-found share reaches the threshold, the run **fails**
+    /// instead of reporting a clean result. `None` (the default) keeps the
+    /// historical behaviour: a 404 never changes the exit code.
+    pub not_found_pct_threshold: Option<f64>,
 }
 
 impl Default for AppConfig {
@@ -131,6 +142,7 @@ impl Default for AppConfig {
             end: None,
             output_dir: PathBuf::from("data"),
             concurrency: 64,
+            not_found_pct_threshold: None,
         }
     }
 }
@@ -138,7 +150,10 @@ impl Default for AppConfig {
 /// Sanity ceiling for `concurrency`: each in-flight download costs a socket,
 /// a file handle and buffers, so anything beyond this is almost certainly a
 /// typo rather than intent.
-const MAX_CONCURRENCY: usize = 1024;
+///
+/// The effective ceiling is lower still: see [`crate::limits`], which caps the
+/// concurrency by the descriptors the process may actually open.
+const MAX_CONCURRENCY: usize = crate::limits::MAX_CONCURRENCY;
 
 impl AppConfig {
     /// Load and validate configuration from a TOML file.
@@ -212,6 +227,14 @@ impl AppConfig {
         {
             return Err(err(format!("start {start} is after end {end}")));
         }
+        if let Some(threshold) = self.not_found_pct_threshold
+            && !(threshold > 0.0 && threshold <= 100.0)
+        {
+            // NaN is rejected as well: both comparisons are false for it.
+            return Err(err(format!(
+                "not_found_pct_threshold must be in (0, 100], got {threshold}"
+            )));
+        }
         if let Some(bad) = self.symbol.iter().find(|s| !is_valid_symbol(s)) {
             return Err(err(format!(
                 "invalid symbol: {bad:?} (expected ASCII letters, digits or underscore)"
@@ -237,7 +260,6 @@ fn is_valid_symbol(symbol: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// A download task: source URL, destination path and identifying metadata.
 /// A download task: source URL, destination path and identifying metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct DownloadTask {
@@ -529,6 +551,39 @@ mod tests {
         let err = "7z".parse::<Timeframe>().unwrap_err();
         assert!(err.contains("unsupported timeframe"));
         assert!(err.contains("1m") && err.contains("1d"));
+    }
+
+    // — not-found threshold —
+
+    #[test]
+    fn not_found_threshold_defaults_to_none() {
+        let cfg = load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]").unwrap();
+        assert_eq!(cfg.not_found_pct_threshold, None);
+    }
+
+    #[test]
+    fn a_not_found_threshold_in_range_is_accepted() {
+        for threshold in ["0.1", "1", "50", "100"] {
+            let cfg = load(&format!(
+                "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\nnot_found_pct_threshold = {threshold}"
+            ))
+            .unwrap();
+            assert!(cfg.not_found_pct_threshold.is_some());
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_not_found_threshold_fails() {
+        for threshold in ["0", "-1", "100.1", "1000"] {
+            let err = load(&format!(
+                "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\nnot_found_pct_threshold = {threshold}"
+            ))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("not_found_pct_threshold"),
+                "threshold {threshold} slipped through: {err}"
+            );
+        }
     }
 
     #[test]

@@ -1,15 +1,16 @@
 //! Local output-tree scan: which files already exist, and tmp-file cleanup.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::collections::HashSet;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use crate::AppError;
 
 /// Scan `data_dir` for existing `.zip` files.
 /// Also removes stale tmp files this tool created (`{name}.zip.{pid}.tmp`)
 /// during the same walk, except those that belong to a still-running process
-/// (see [`belongs_to_live_process`]). Foreign `.tmp` files are left alone.
+/// (see [`has_live_owner`]). Foreign `.tmp` files are left alone.
 ///
 /// Returns 128-bit hashes of the relative paths (see [`rel_path_hash`])
 /// rather than the paths themselves: the set can hold millions of entries
@@ -56,7 +57,7 @@ fn scan_with_batch_size(root: &Path, batch_entries: usize) -> LocalFileSet {
                     batch.clear();
                 }
             }
-            Err(err) => tracing::warn!(error = %err, "walkdir entry failed"),
+            Err(err) => tracing::warn!(error = ?err, "walkdir entry failed"),
         }
     }
     if !batch.is_empty() {
@@ -108,20 +109,27 @@ fn hash_chunk(chunk: &[walkdir::DirEntry], root: &Path) -> LocalFileSet {
             Some("zip" | "tmp") => {}
             _ => continue,
         }
-        let rel = e.path().strip_prefix(root).unwrap_or(e.path());
+        let Ok(rel) = e.path().strip_prefix(root) else {
+            // The entry is not below `root`, so its relative path is unknown
+            // and can never match a download candidate. Hashing the absolute
+            // path instead would silently produce a set that never matches,
+            // so the entry is dropped instead.
+            tracing::warn!(path = %e.path().display(), "entry is outside the scan root");
+            continue;
+        };
         let s = rel.to_string_lossy();
 
         if s.ends_with(".tmp") {
             if !is_our_tmp(&s) {
                 continue;
             }
-            if belongs_to_live_process(e.path()) {
+            if has_live_owner(e.path()) {
                 continue;
             }
             if let Err(err) = std::fs::remove_file(e.path()) {
                 tracing::warn!(
                     path = %e.path().display(),
-                    error = %err,
+                    error = ?err,
                     "failed to remove tmp file",
                 );
             }
@@ -154,7 +162,7 @@ fn is_our_tmp(rel: &str) -> bool {
 }
 
 /// Age below which a `.tmp` file is treated as possibly still in flight.
-const LIVE_TMP_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const LIVE_TMP_WINDOW: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// Returns true when a `.tmp` file looks like an in-flight download of a
 /// still-running process, judging by its recent modification time.
@@ -163,7 +171,7 @@ const LIVE_TMP_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 
 /// so we treat any tmp file modified within the last few minutes as potentially
 /// live and leave it untouched. Older tmp files are considered stale (the
 /// writer crashed or finished) and may be removed by the caller.
-fn belongs_to_live_process(path: &Path) -> bool {
+fn has_live_owner(path: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
@@ -178,8 +186,21 @@ fn belongs_to_live_process(path: &Path) -> bool {
 /// Wraps a `HashSet<u128>` so callers do not depend on the hashing scheme: the
 /// raw set stays private and every entry point goes through `*_hash` or takes
 /// a relative path directly.
-#[derive(Default, Clone)]
-pub(crate) struct LocalFileSet(std::collections::HashSet<u128>);
+#[derive(Clone)]
+pub(crate) struct LocalFileSet(HashSet<u128, ahash::RandomState>);
+
+impl Default for LocalFileSet {
+    /// A set with the same fixed seeds as [`rel_path_hash`], so the hash of a
+    /// path is the same whatever produced it.
+    fn default() -> Self {
+        Self(HashSet::with_hasher(ahash::RandomState::with_seeds(
+            0x517c_c1b7_2722_0a95,
+            0x2545_f491_4f6c_dd1d,
+            0x9e37_79b9_7f4a_7c15,
+            0xbf58_476d_1ce4_e5b9,
+        )))
+    }
+}
 
 impl LocalFileSet {
     /// Whether a relative path is present in the set.
@@ -201,10 +222,10 @@ impl LocalFileSet {
 
     /// Move every entry of `other` into this set.
     pub(crate) fn absorb(&mut self, other: Self) {
-        if other.0.is_empty() {
+        if other.is_empty() {
             return;
         }
-        if self.0.is_empty() {
+        if self.is_empty() {
             self.0 = other.0;
             return;
         }
@@ -218,7 +239,6 @@ impl LocalFileSet {
     }
 
     /// Whether the set is empty.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -230,18 +250,34 @@ impl LocalFileSet {
 /// The set is queried once per candidate download and can hold millions of
 /// entries, so only a 128-bit hash is kept instead of the path itself (see
 /// [`scan_local_files`] for the memory trade-off). A collision would skip one
-/// file; two independent SipHash-1-3 passes over the path make this
-/// practically impossible, and the downstream kline reader checks for gaps
-/// anyway. Both inserts and lookups happen within the same process, so the
-/// hash only needs to be stable for the duration of a run.
+/// file; two independent passes over the path make this practically
+/// impossible, and the downstream kline reader checks for gaps anyway.
+///
+/// The hasher is `ahash` rather than `SipHash`: the paths are built by this
+/// crate from a validated symbol and a fixed date, so they are never
+/// attacker-controlled and a cryptographic hash buys nothing. The seeds are
+/// fixed, which keeps the hash reproducible across runs.
+///
+/// Both inserts and lookups happen within the same process, so the hash only
+/// needs to be stable for the duration of a run.
 #[must_use]
 pub(crate) fn rel_path_hash(rel: &str) -> u128 {
-    let mut first = DefaultHasher::new();
-    rel.hash(&mut first);
-    let mut second = DefaultHasher::new();
+    static STATE: OnceLock<ahash::RandomState> = OnceLock::new();
+    let state = STATE.get_or_init(|| {
+        ahash::RandomState::with_seeds(
+            0x517c_c1b7_2722_0a95,
+            0x2545_f491_4f6c_dd1d,
+            0x9e37_79b9_7f4a_7c15,
+            0xbf58_476d_1ce4_e5b9,
+        )
+    });
+
+    let first = state.hash_one(rel);
+    // A different prefix makes the second pass decorrelated from the first.
+    let mut second = state.build_hasher();
     second.write_u8(0xa5);
     rel.hash(&mut second);
-    (u128::from(first.finish()) << 64) | u128::from(second.finish())
+    (u128::from(first) << 64) | u128::from(second.finish())
 }
 
 #[cfg(test)]
@@ -279,6 +315,31 @@ mod tests {
     #[test]
     fn rel_path_hash_distinguishes_paths() {
         assert_ne!(rel_path_hash("a.zip"), rel_path_hash("b.zip"));
+    }
+
+    #[test]
+    fn rel_path_hash_is_stable_across_calls() {
+        // The hash is used as a key: a value that changed between the insert
+        // and the lookup would make the file invisible.
+        assert_eq!(rel_path_hash("a/b/c.zip"), rel_path_hash("a/b/c.zip"));
+    }
+
+    #[test]
+    fn rel_path_hash_distinguishes_similar_paths() {
+        // Paths that differ only in their tail or in a separator must not
+        // collide: a collision would silently skip a file.
+        let paths = [
+            "binance/data/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-01.zip",
+            "binance/data/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-02.zip",
+            "binance/data/um/daily/klines/BTCUSDT/1d/BTCUSDT-1d-2024-01-01.zip",
+        ];
+        for (i, a) in paths.iter().enumerate() {
+            for (j, b) in paths.iter().enumerate() {
+                if i != j {
+                    assert_ne!(rel_path_hash(a), rel_path_hash(b), "{a} vs {b}");
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -326,7 +387,7 @@ mod tests {
         let stale = data.join("BTCUSDT-1m-2024-01-01.zip.0.tmp");
         std::fs::write(&stale, b"stale").unwrap();
         let f = std::fs::File::open(&stale).unwrap();
-        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 60);
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_mins(10);
         f.set_times(std::fs::FileTimes::new().set_modified(old_time))
             .unwrap();
         drop(f);
@@ -373,6 +434,14 @@ mod tests {
         assert_eq!(a.len(), 2);
         assert!(a.contains_rel_path("a.zip"));
         assert!(a.contains_rel_path("b.zip"));
+    }
+
+    #[test]
+    fn is_empty_reflects_the_set_contents() {
+        let mut set = LocalFileSet::default();
+        assert!(set.is_empty());
+        set.insert_hash(rel_path_hash("a.zip"));
+        assert!(!set.is_empty());
     }
 
     #[test]

@@ -20,7 +20,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = bdd::Cli::parse();
 
     // Run the download pipeline, annotating any error with pipeline context.
-    bdd::run(&cli.config)
+    let options = bdd::RunOptions::new().with_verify(cli.verify);
+    bdd::run_with_options(&cli.config, &options)
         .await
         .context("binance-data-downloader run failed")?;
     Ok(())

@@ -58,6 +58,20 @@ pub(crate) fn clamp_retry_after(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Fetch `url` from a mock server that answers with `template`.
+    async fn response_for(template: ResponseTemplate) -> reqwest::Response {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(template)
+            .mount(&server)
+            .await;
+        reqwest::get(format!("{}/x", server.uri()))
+            .await
+            .expect("the mock server must answer")
+    }
 
     #[test]
     fn default_backoff_has_max_elapsed() {
@@ -80,7 +94,7 @@ mod tests {
     #[test]
     fn clamp_retry_after_caps_oversized_value_to_remaining_window() {
         let deadline = std::time::Instant::now() + RETRY_WINDOW;
-        let clamped = clamp_retry_after(Some(std::time::Duration::from_secs(86_400)), deadline);
+        let clamped = clamp_retry_after(Some(std::time::Duration::from_hours(24)), deadline);
         assert!(clamped.unwrap() <= RETRY_WINDOW);
     }
 
@@ -106,5 +120,52 @@ mod tests {
             clamp_retry_after(Some(std::time::Duration::from_secs(60)), deadline),
             Some(std::time::Duration::ZERO)
         );
+    }
+
+    // — parse_retry_after —
+
+    #[tokio::test]
+    async fn parse_retry_after_reads_the_seconds_form() {
+        let resp =
+            response_for(ResponseTemplate::new(429).insert_header("Retry-After", "120")).await;
+        assert_eq!(
+            parse_retry_after(&resp),
+            Some(std::time::Duration::from_secs(120))
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_retry_after_tolerates_surrounding_whitespace() {
+        let resp =
+            response_for(ResponseTemplate::new(429).insert_header("Retry-After", " 7 ")).await;
+        assert_eq!(
+            parse_retry_after(&resp),
+            Some(std::time::Duration::from_secs(7))
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_retry_after_ignores_a_missing_header() {
+        let resp = response_for(ResponseTemplate::new(429)).await;
+        assert_eq!(parse_retry_after(&resp), None);
+    }
+
+    #[tokio::test]
+    async fn parse_retry_after_ignores_a_non_numeric_header() {
+        let resp =
+            response_for(ResponseTemplate::new(429).insert_header("Retry-After", "soon")).await;
+        assert_eq!(parse_retry_after(&resp), None);
+    }
+
+    #[tokio::test]
+    async fn parse_retry_after_ignores_the_http_date_form() {
+        // HTTP-date values are deliberately not parsed: the caller falls back
+        // to the regular backoff schedule.
+        let resp = response_for(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT"),
+        )
+        .await;
+        assert_eq!(parse_retry_after(&resp), None);
     }
 }

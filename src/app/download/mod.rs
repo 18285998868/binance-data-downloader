@@ -80,6 +80,26 @@ impl DownloadStats {
     }
 }
 
+/// A download that failed, tagged with the URL it happened on.
+///
+/// The tag matters: without it the batch summary can only say "35 of 71
+/// downloads failed" without saying *which* files failed or *why* — and the
+/// reason (a full disk, an exhausted descriptor limit, a bad response) is
+/// exactly what the reader needs.
+#[derive(Debug)]
+pub(crate) struct FailedDownload {
+    /// The URL that was being downloaded.
+    pub url: String,
+    /// Why it failed.
+    pub error: AppError,
+}
+
+impl std::fmt::Display for FailedDownload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.url, self.error)
+    }
+}
+
 /// Download all tasks with bounded concurrency.
 ///
 /// # Errors
@@ -92,11 +112,20 @@ pub(crate) async fn run_downloads(
     tasks: Vec<DownloadTask>,
     concurrency: usize,
     cancel: &crate::cancel::CancelToken,
+    verify: bool,
 ) -> Result<DownloadStats, DownloadFailure> {
     let cancel = cancel.clone();
     let download_fn = move |c: reqwest::Client, t: DownloadTask| {
         let cancel = cancel.clone();
-        async move { stream::download_to_file(&c, &t, &cancel).await }
+        async move {
+            let result = stream::download_to_file(&c, &t, &cancel, verify).await;
+            // The URL is moved into the failure only when there is one: the
+            // happy path stays allocation-free.
+            match result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(FailedDownload { url: t.url, error }),
+            }
+        }
     };
     run_downloads_inner(client, tasks, concurrency, download_fn).await
 }
@@ -114,7 +143,7 @@ async fn run_downloads_inner<F, Fut>(
 ) -> Result<DownloadStats, DownloadFailure>
 where
     F: Fn(reqwest::Client, DownloadTask) -> Fut + Send,
-    Fut: Future<Output = Result<(), AppError>>,
+    Fut: Future<Output = Result<(), FailedDownload>>,
 {
     let total = tasks.len();
     let concurrency = concurrency.max(1);
@@ -128,6 +157,9 @@ where
         ..DownloadStats::default()
     };
     let mut logged_failures = 0;
+    // The reasons of the first few failures, so the batch summary says *why*
+    // instead of only *how many*.
+    let mut failure_details: Vec<String> = Vec::new();
 
     let mut stream = stream_iter(tasks)
         .map(|t| {
@@ -141,18 +173,22 @@ where
     while let Some(result) = stream.next().await {
         match result {
             Ok(()) => stats.ok += 1,
-            Err(AppError::NotFound { .. }) => stats.not_found += 1,
-            // Cancellation is not a failure: stop scheduling at once and let
-            // the remaining temp files be reclaimed by the next scan.
-            Err(AppError::Cancelled) => {
-                stats.cancelled += 1;
-                break;
-            }
-            Err(e) => {
-                stats.failed += 1;
-                if logged_failures < MAX_LOGGED_FAILURES {
-                    logged_failures += 1;
-                    tracing::warn!(error = %e, "download failed");
+            Err(failure) => {
+                if matches!(&failure.error, AppError::NotFound { .. }) {
+                    stats.not_found += 1;
+                } else if matches!(&failure.error, AppError::Cancelled) {
+                    // Cancellation is not a failure: stop scheduling at once
+                    // and let the remaining temp files be reclaimed by the
+                    // next scan.
+                    stats.cancelled += 1;
+                    break;
+                } else {
+                    stats.failed += 1;
+                    if logged_failures < MAX_LOGGED_FAILURES {
+                        logged_failures += 1;
+                        tracing::warn!(url = %failure.url, error = ?failure.error, "download failed");
+                        failure_details.push(failure.to_string());
+                    }
                 }
             }
         }
@@ -190,10 +226,13 @@ where
     if stats.failed > 0 {
         return Err(DownloadFailure {
             stats,
-            error: AppError::Data(format!(
-                "{} of {} downloads failed",
-                stats.failed, stats.total
-            )),
+            error: AppError::Data(
+                crate::error::FailureReport::new(format!(
+                    "{} of {} downloads failed",
+                    stats.failed, stats.total
+                ))
+                .with_details(failure_details),
+            ),
         });
     }
     Ok(stats)
@@ -208,6 +247,14 @@ mod tests {
     use std::time::Duration;
 
     // — run_downloads_inner —
+
+    /// A failed download, for the tests.
+    fn failed(url: &str, error: AppError) -> FailedDownload {
+        FailedDownload {
+            url: url.to_owned(),
+            error,
+        }
+    }
 
     #[tokio::test]
     async fn run_downloads_empty_tasks_returns_ok() {
@@ -249,9 +296,12 @@ mod tests {
         let tasks = vec![dummy_task("a"), dummy_task("b")];
         let download_fn = |_: reqwest::Client, t: DownloadTask| async move {
             if t.pair == "a" {
-                Err(AppError::NotFound {
-                    url: "http://x".into(),
-                })
+                Err(failed(
+                    "http://x",
+                    AppError::NotFound {
+                        url: "http://x".into(),
+                    },
+                ))
             } else {
                 Ok(())
             }
@@ -270,13 +320,19 @@ mod tests {
         let tasks = vec![dummy_task("a"), dummy_task("b"), dummy_task("c")];
         let download_fn = |_: reqwest::Client, t: DownloadTask| async move {
             match t.pair.as_str() {
-                "a" => Err(AppError::NotFound {
-                    url: "http://x".into(),
-                }),
-                "b" => Err(AppError::DownloadFailed {
-                    url: "x".into(),
-                    reason: "bad".into(),
-                }),
+                "a" => Err(failed(
+                    "http://x",
+                    AppError::NotFound {
+                        url: "http://x".into(),
+                    },
+                )),
+                "b" => Err(failed(
+                    "x",
+                    AppError::DownloadFailed {
+                        url: "x".into(),
+                        reason: "bad".into(),
+                    },
+                )),
                 _ => Ok(()),
             }
         };
@@ -292,10 +348,13 @@ mod tests {
         let tasks = vec![dummy_task("a"), dummy_task("b")];
         let download_fn = |_: reqwest::Client, t: DownloadTask| async move {
             if t.pair == "b" {
-                Err(AppError::DownloadFailed {
-                    url: "x".into(),
-                    reason: "bad".into(),
-                })
+                Err(failed(
+                    "x",
+                    AppError::DownloadFailed {
+                        url: "x".into(),
+                        reason: "bad".into(),
+                    },
+                ))
             } else {
                 Ok(())
             }
@@ -304,6 +363,37 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("1 of 2 downloads failed"));
+    }
+
+    #[tokio::test]
+    async fn the_failure_summary_names_the_files_and_the_reasons() {
+        // Regression guard: the summary used to say only "1 of 2 downloads
+        // failed", leaving the reader to grep the log for the reason.
+        let client = reqwest::Client::new();
+        let tasks = vec![dummy_task("a"), dummy_task("b")];
+        let download_fn = |_: reqwest::Client, t: DownloadTask| async move {
+            if t.pair == "b" {
+                Err(failed(
+                    "http://x/b.zip",
+                    AppError::DownloadFailed {
+                        url: "http://x/b.zip".into(),
+                        reason: "HTTP 500".into(),
+                    },
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let err = run_downloads_inner(&client, tasks, 16, download_fn)
+            .await
+            .unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("1 of 2 downloads failed"),
+            "got {rendered}"
+        );
+        assert!(rendered.contains("http://x/b.zip"), "got {rendered}");
+        assert!(rendered.contains("HTTP 500"), "got {rendered}");
     }
 
     #[tokio::test]
@@ -439,6 +529,29 @@ mod tests {
         };
         assert!((stats.not_found_pct() - 25.0).abs() < f64::EPSILON);
         assert_eq!(DownloadStats::default().not_found_pct(), 0.0);
+    }
+
+    // — DownloadFailure —
+
+    #[test]
+    fn download_failure_renders_the_underlying_error() {
+        let failure = DownloadFailure {
+            stats: DownloadStats {
+                total: 3,
+                failed: 1,
+                ..DownloadStats::default()
+            },
+            error: AppError::DownloadFailed {
+                url: "http://x/a.zip".into(),
+                reason: "HTTP 500".into(),
+            },
+        };
+        assert_eq!(
+            failure.to_string(),
+            "download failed for http://x/a.zip: HTTP 500"
+        );
+        // The wrapped error stays reachable through the source chain.
+        assert!(std::error::Error::source(&failure).is_some());
     }
 
     // — helpers —

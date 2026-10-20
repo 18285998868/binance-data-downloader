@@ -1,9 +1,22 @@
+[workspace]
+
 [package]
 name = "binance-data-downloader"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+# **刻意不声明 `rust-version`**: 本项目目标是"永远用最新 stable"(见
+# `rust-toolchain.toml` 的 `channel = "stable"`)。`rust-version` 是**最低支持
+# 版本**的下限声明, 与该目标直接冲突:
+#   1. 它允许 cargo 用更老的工具链构建 —— 鼓励版本漂移;
+#   2. `clippy::incompatible_msrv` 会拦截任何**比声明更新**的 API —— 恰好挡住
+#      "用上最新 Rust"这件事本身;
+#   3. 它需要随每次 stable 升级手工跟进, 迟早成为过期信息。
+# 下限由 `rust-toolchain.toml` 隐式表达: 只会用最新 stable。
+#
+# 依赖树自身也有下限(锁定图中 `redb 4.4.0` 要求 rustc >= 1.90), 但那不是本项目
+# 对使用者的承诺, 而是用最新 stable 时自然满足的事实。
 authors = ["NautilusTrader Developer"]
+description = "Download historical USDⓈ-M futures kline archives from the Binance public data archive."
 license = "MIT"
 
 [lib]
@@ -25,6 +38,22 @@ thiserror = "2"
 anyhow = "1"
 backoff = { version = "0.4", features = ["tokio"] }
 redb = "4"
+# Parses the S3 bucket listing that tells us the first archive file of a
+# symbol/timeframe. A real XML parser rather than a hand-rolled scanner: the
+# response is machine-generated but its exact shape is not ours to guarantee.
+roxmltree = "0.21"
+# Reads the central directory of a downloaded archive, for `--verify`.
+# `default-features = false` keeps the compression backends out: validating an
+# archive only needs its table of contents, never a decompression.
+zip = { version = "9", default-features = false }
+# Reads the process' `RLIMIT_NOFILE`, so the concurrency can be capped by what
+# the process may actually open. A safe wrapper: this crate forbids `unsafe`.
+rlimit = "0.11"
+# Hashes the relative paths of the local file set. A faster, non-cryptographic
+# hasher: the paths come from our own URL construction, never from an
+# untrusted party, so there is nothing to defend against. `runtime-rng` is off
+# on purpose -- the seeds are fixed, which keeps the hash reproducible.
+ahash = { version = "0.8", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -42,9 +71,7 @@ style = { level = "warn", priority = -1 }
 complexity = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 
-# Selected rather than the whole group: the ones that catch real defects here
-# without pushing toward less readable code. `[lints.clippy]` enables the
-# `pedantic` group; individual lints below then tune it.
+# The whole `pedantic` group is enabled; individual lints below then tune it.
 pedantic = { level = "warn", priority = -1 }
 # `too_many_lines` fires on the pipeline and the scanner, which are long
 # because each step is sequential and commented, not because they sprawl.

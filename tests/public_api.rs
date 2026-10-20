@@ -97,7 +97,7 @@ fn app_error_messages_are_lowercase_and_self_describing() {
         (AppError::Date("bad ts".into()), "date error: bad ts"),
         (AppError::Cache("db gone".into()), "cache error: db gone"),
         (
-            AppError::Data("2 of 5 downloads failed".into()),
+            AppError::Data(bdd::FailureReport::new("2 of 5 downloads failed")),
             "data error: 2 of 5 downloads failed",
         ),
     ];

@@ -8,8 +8,6 @@ use crate::backoff::{RETRY_WINDOW, clamp_retry_after, default_backoff, parse_ret
 use crate::cache::Cache;
 
 const CACHE_DOMAIN: &str = "start_date";
-/// Cached first-kline dates are considered stale after 30 days.
-const CACHE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Binance USDⓈ-M futures API base. Kept as a parameter elsewhere so tests
 /// can point at a local mock server.
@@ -63,7 +61,7 @@ pub(crate) async fn get_first_kline_date(
 ) -> Result<chrono::NaiveDate, AppError> {
     let key = format!("{symbol}:{timeframe}");
     match cache
-        .read_async(CACHE_DOMAIN, &key, Some(CACHE_TTL_SECS))
+        .read_async(CACHE_DOMAIN, &key, Some(crate::cache::CACHE_TTL_SECS))
         .await
     {
         Ok(Some(cached)) => {
@@ -80,7 +78,8 @@ pub(crate) async fn get_first_kline_date(
         Err(e) => tracing::warn!(
             symbol,
             timeframe,
-            "cache read failed, treating as miss: {e}",
+            error = ?e,
+            "cache read failed, treating as miss",
         ),
     }
     let date = fetch_first_kline(client, fapi_base, symbol, timeframe).await?;
@@ -92,7 +91,7 @@ pub(crate) async fn get_first_kline_date(
         )
         .await
     {
-        tracing::warn!(symbol, timeframe, "failed to cache start date: {e}");
+        tracing::warn!(symbol, timeframe, error = ?e, "failed to cache start date");
     }
     Ok(date)
 }

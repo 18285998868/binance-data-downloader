@@ -1,0 +1,12 @@
+# 永远使用最新 stable。
+#
+# 与仓库既有惯例一致（`creats/vector-ta/rust-toolchain.toml`）。stable channel 永远指向
+# 最新发布版，故**无需人工跟进版本号** —— 进到本目录 `cargo build` 即自动用最新 stable。
+#
+# 为什么需要它: 构建机/开发机的**默认**工具链可能是老版本(实测本机默认是 1.88),
+# 而 `cargo` 不会自动切换工具链。裸 `cargo build` 会因依赖树要求更高 rustc 而失败,
+# 且报错("redb@4.4.0 requires rustc 1.90")与真正的解法毫无关系 —— 真正要做的只是
+# "用最新 stable"。这个文件把该解法自动化。
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

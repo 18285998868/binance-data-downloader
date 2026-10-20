@@ -22,6 +22,10 @@ const MAX_MAGIC_CHUNKS: u32 = 8;
 ///
 /// Writes to a `{dest}.{pid}.tmp` file, then atomically renames to `dest`.
 ///
+/// When `verify` is set, the finished file is additionally opened as a zip
+/// archive and checked to hold at least one entry; a corrupt archive is
+/// retried like any other transient failure.
+///
 /// Returns [`crate::AppError::Cancelled`] as soon as `cancel` fires, which
 /// abandons the in-flight request and leaves the temp file behind; the next
 /// [`crate::scan::scan_local_files`] pass reclaims it.
@@ -37,8 +41,36 @@ pub(crate) async fn download_to_file(
     client: &reqwest::Client,
     task: &DownloadTask,
     cancel: &CancelToken,
+    verify: bool,
 ) -> Result<(), crate::AppError> {
-    download_to_file_with_backoff(client, task, default_backoff(), RETRY_WINDOW, cancel).await
+    download_to_file_with_backoff(
+        client,
+        task,
+        default_backoff(),
+        RETRY_WINDOW,
+        cancel,
+        verify,
+    )
+    .await
+}
+
+/// Check that the file is a readable zip archive holding at least one entry.
+///
+/// The central directory is read, not the payloads: that is what tells us the
+/// archive is structurally intact, at a fraction of the cost of decompressing
+/// it.
+async fn verify_zip_archive(path: &std::path::Path) -> std::io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path)?;
+        let archive = zip::ZipArchive::new(file).map_err(std::io::Error::other)?;
+        if archive.is_empty() {
+            return Err(std::io::Error::other("zip archive holds no entry"));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 /// Temp path for an in-flight download: `{dest}.{pid}.tmp`.
@@ -59,6 +91,7 @@ async fn download_to_file_with_backoff(
     backoff: impl Backoff + 'static,
     window: std::time::Duration,
     cancel: &CancelToken,
+    verify: bool,
 ) -> Result<(), crate::AppError> {
     let tmp_path = tmp_path_for(&task.dest);
     let deadline = std::time::Instant::now() + window;
@@ -215,6 +248,18 @@ async fn download_to_file_with_backoff(
                 .map_err(|e| BackoffError::Permanent(crate::AppError::Io(e)))?;
             drop(writer);
 
+            // Optional structural check of the finished file. A corrupt
+            // archive is worth another attempt, so it is transient.
+            if verify && let Err(e) = verify_zip_archive(&tmp).await {
+                return Err(BackoffError::Transient {
+                    err: crate::AppError::DownloadFailed {
+                        url: u,
+                        reason: format!("zip verification failed: {e}"),
+                    },
+                    retry_after: None,
+                });
+            }
+
             tokio::fs::rename(&tmp, &dest)
                 .await
                 .map_err(|e| BackoffError::Permanent(crate::AppError::Io(e)))?;
@@ -282,7 +327,8 @@ mod tests {
         let cancel = CancelToken::new();
         let task = make_task(&server, dir.path());
         let result =
-            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel).await;
+            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
+                .await;
         assert!(result.is_ok());
         assert_eq!(std::fs::read(&task.dest).unwrap(), ZIP_BODY);
         assert!(!tmp_path_for(&task.dest).exists());
@@ -301,7 +347,8 @@ mod tests {
         let cancel = CancelToken::new();
         let task = make_task(&server, dir.path());
         let result =
-            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel).await;
+            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
+                .await;
         assert!(matches!(result, Err(AppError::DownloadFailed { .. })));
         assert!(!task.dest.exists());
         assert!(!tmp_path_for(&task.dest).exists());
@@ -320,7 +367,8 @@ mod tests {
         let cancel = CancelToken::new();
         let task = make_task(&server, dir.path());
         let result =
-            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel).await;
+            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
+                .await;
         assert!(matches!(result, Err(AppError::NotFound { .. })));
     }
 
@@ -356,9 +404,15 @@ mod tests {
         let client = reqwest::Client::new();
         let cancel = CancelToken::new();
         let task = make_task(&server, dir.path());
-        let result =
-            download_to_file_with_backoff(&client, &task, default_backoff(), RETRY_WINDOW, &cancel)
-                .await;
+        let result = download_to_file_with_backoff(
+            &client,
+            &task,
+            default_backoff(),
+            RETRY_WINDOW,
+            &cancel,
+            false,
+        )
+        .await;
         assert!(result.is_ok());
         assert_eq!(std::fs::read(&task.dest).unwrap(), ZIP_BODY);
     }
@@ -386,6 +440,7 @@ mod tests {
                 default_backoff(),
                 std::time::Duration::from_millis(100),
                 &cancel,
+                false,
             ),
         )
         .await;
@@ -406,7 +461,8 @@ mod tests {
         let cancel = CancelToken::new();
         let task = make_task(&server, dir.path());
         let result =
-            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel).await;
+            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
+                .await;
         assert!(matches!(result, Err(AppError::DownloadFailed { .. })));
     }
 
@@ -442,9 +498,15 @@ mod tests {
         let client = reqwest::Client::new();
         let cancel = CancelToken::new();
         let task = make_task(&server, dir.path());
-        let result =
-            download_to_file_with_backoff(&client, &task, default_backoff(), RETRY_WINDOW, &cancel)
-                .await;
+        let result = download_to_file_with_backoff(
+            &client,
+            &task,
+            default_backoff(),
+            RETRY_WINDOW,
+            &cancel,
+            false,
+        )
+        .await;
         assert!(result.is_ok());
         assert_eq!(std::fs::read(&task.dest).unwrap(), ZIP_BODY);
     }
@@ -464,7 +526,8 @@ mod tests {
         // 4xx (other than 404/429) is permanent: one attempt, no retry, and no
         // filesystem side effects at all.
         let result =
-            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel).await;
+            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
+                .await;
         match result {
             Err(AppError::DownloadFailed { reason, .. }) => assert!(reason.contains("400")),
             other => panic!("expected DownloadFailed, got {other:?}"),
@@ -492,7 +555,7 @@ mod tests {
         };
         let client = reqwest::Client::new();
         let cancel = CancelToken::new();
-        download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel)
+        download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), ZIP_BODY);
@@ -534,7 +597,8 @@ mod tests {
         let task = make_task(&server, dir.path());
 
         let result =
-            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel).await;
+            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
+                .await;
         assert!(matches!(result, Err(AppError::Cancelled)));
         assert!(!task.dest.exists());
     }
@@ -562,7 +626,14 @@ mod tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            download_to_file_with_backoff(&client, &task, default_backoff(), RETRY_WINDOW, &cancel),
+            download_to_file_with_backoff(
+                &client,
+                &task,
+                default_backoff(),
+                RETRY_WINDOW,
+                &cancel,
+                false,
+            ),
         )
         .await
         .expect("cancellation must interrupt the retry loop promptly");
@@ -587,10 +658,98 @@ mod tests {
         let client = reqwest::Client::new();
         let cancel = CancelToken::new();
         let task = make_task(&server, dir.path());
-        download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel)
+        download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&task.dest).unwrap(), ZIP_BODY);
+    }
+
+    // — zip verification —
+
+    /// A minimal but valid zip archive holding one stored entry.
+    fn valid_zip() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            writer
+                .start_file("BTCUSDT-1d.csv", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut writer, b"open_time,open\n").unwrap();
+            writer.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    /// A body with a valid zip magic but a broken central directory.
+    fn corrupt_zip() -> Vec<u8> {
+        let mut bytes = valid_zip();
+        // Wreck the central directory, which lives at the end of the file.
+        let len = bytes.len();
+        bytes[len - 6] = 0xff;
+        bytes
+    }
+
+    #[tokio::test]
+    async fn verify_accepts_a_valid_archive() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(valid_zip()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let client = reqwest::Client::new();
+        let cancel = CancelToken::new();
+        let task = make_task(&server, dir.path());
+        download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, true)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&task.dest).unwrap(), valid_zip());
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_a_corrupt_archive() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(corrupt_zip()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let client = reqwest::Client::new();
+        let cancel = CancelToken::new();
+        let task = make_task(&server, dir.path());
+        let result =
+            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, true)
+                .await;
+        match result {
+            Err(AppError::DownloadFailed { reason, .. }) => {
+                assert!(reason.contains("zip verification failed"), "got: {reason}");
+            }
+            other => panic!("expected DownloadFailed, got {other:?}"),
+        }
+        // The broken archive must not land.
+        assert!(!task.dest.exists());
+    }
+
+    #[tokio::test]
+    async fn verification_is_opt_in() {
+        // The same corrupt body is accepted when the check is off: the magic
+        // bytes and the content length are still fine.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(corrupt_zip()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let client = reqwest::Client::new();
+        let cancel = CancelToken::new();
+        let task = make_task(&server, dir.path());
+        download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
+            .await
+            .unwrap();
+        assert!(task.dest.exists());
     }
 
     // — zip magic —
@@ -642,7 +801,7 @@ mod tests {
             pair: "BTCUSDT".into(),
             timeframe: crate::config::Timeframe::M1,
         };
-        download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel)
+        download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&task.dest).unwrap(), ZIP_BODY);
@@ -661,7 +820,7 @@ mod tests {
             pair: "BTCUSDT".into(),
             timeframe: crate::config::Timeframe::M1,
         };
-        download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel)
+        download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&task.dest).unwrap(), ZIP_BODY);
@@ -681,7 +840,8 @@ mod tests {
             timeframe: crate::config::Timeframe::M1,
         };
         let result =
-            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel).await;
+            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
+                .await;
         match result {
             Err(AppError::DownloadFailed { reason, .. }) => {
                 assert!(reason.contains("not a zip"), "unexpected: {reason}");
@@ -704,7 +864,8 @@ mod tests {
         let cancel = CancelToken::new();
         let task = make_task(&server, dir.path());
         let result =
-            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel).await;
+            download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
+                .await;
         assert!(matches!(result, Err(AppError::DownloadFailed { .. })));
     }
 
