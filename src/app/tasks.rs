@@ -27,7 +27,10 @@ pub(crate) fn build_download_tasks(
             // Defense in depth: `build_urls` only emits plain relative paths
             // (the symbol charset is validated in config), but a bug there
             // must never let a download escape `data_dir`.
-            debug_assert!(
+            // `assert!`, not `debug_assert!`: an internal invariant violation
+            // must stop the run in release builds too, before a malformed path
+            // can escape `data_dir`.
+            assert!(
                 Path::new(&dl.rel_path)
                     .components()
                     .all(|c| matches!(c, std::path::Component::Normal(_))),

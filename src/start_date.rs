@@ -1,10 +1,10 @@
 //! Resolution and caching of a symbol's first kline date via the `fapi` API.
 
-use backoff::Error as BackoffError;
-use backoff::future::retry;
-
 use crate::AppError;
-use crate::backoff::{RETRY_WINDOW, clamp_retry_after, default_backoff, parse_retry_after};
+use crate::backoff::{
+    RETRY_WINDOW, RetryError, default_retry_policy, is_transient_status, parse_retry_after,
+    retry_operation,
+};
 use crate::cache::Cache;
 
 const CACHE_DOMAIN: &str = "start_date";
@@ -111,12 +111,13 @@ async fn fetch_first_kline(
         let c = client.clone();
         let u = url.clone();
         async move {
-            // Hard stop: `Retry-After` overrides bypass backoff's own
-            // `max_elapsed_time` (see [`RETRY_WINDOW`]); the window is
-            // enforced here as well, and the override itself is clamped to
-            // the remaining window via `clamp_retry_after`.
+            // Do not start another attempt after the retry window. The shared
+            // retry loop caps every backon/Retry-After delay at the same
+            // deadline; this check also covers a retry that became ready just
+            // at the cutoff. An already in-flight request is bounded by the
+            // client's 300-second whole-request timeout instead.
             if std::time::Instant::now() >= deadline {
-                return Err(BackoffError::Permanent(AppError::Api {
+                return Err(RetryError::permanent(AppError::Api {
                     status: None,
                     message: format!("retry window elapsed for {u}"),
                 }));
@@ -124,24 +125,19 @@ async fn fetch_first_kline(
             let r = match c.get(&u).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(BackoffError::Transient {
-                        err: AppError::from(e),
-                        retry_after: None,
-                    });
+                    return Err(RetryError::transient(AppError::from(e), None));
                 }
             };
             let status = r.status();
             if !status.is_success() {
-                return if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    || status.is_server_error()
-                {
-                    Err(BackoffError::Transient {
-                        err: AppError::Api {
+                return if is_transient_status(status) {
+                    Err(RetryError::transient(
+                        AppError::Api {
                             status: Some(status.as_u16()),
                             message: format!("HTTP {status} for {u}"),
                         },
-                        retry_after: clamp_retry_after(parse_retry_after(&r), deadline),
-                    })
+                        parse_retry_after(&r),
+                    ))
                 } else {
                     // Binance returns error objects with 4xx statuses, e.g.
                     // `{"code":-1121,"msg":"Invalid symbol."}`; surface
@@ -149,11 +145,11 @@ async fn fetch_first_kline(
                     // from a transient outage.
                     let body = r.text().await.ok();
                     if is_unknown_symbol_body(body.as_deref()) {
-                        Err(BackoffError::Permanent(AppError::UnknownSymbol {
+                        Err(RetryError::permanent(AppError::UnknownSymbol {
                             symbol: symbol.to_string(),
                         }))
                     } else {
-                        Err(BackoffError::Permanent(AppError::Api {
+                        Err(RetryError::permanent(AppError::Api {
                             status: Some(status.as_u16()),
                             message: format!("HTTP {status} for {u}"),
                         }))
@@ -163,10 +159,7 @@ async fn fetch_first_kline(
             let body = match r.text().await {
                 Ok(body) => body,
                 Err(e) => {
-                    return Err(BackoffError::Transient {
-                        err: AppError::from(e),
-                        retry_after: None,
-                    });
+                    return Err(RetryError::transient(AppError::from(e), None));
                 }
             };
             // Binance reports failures (e.g. an unknown symbol) as an object
@@ -176,31 +169,31 @@ async fn fetch_first_kline(
                 Ok(rows) => rows,
                 Err(parse_err) => {
                     if let Some(err) = api_error_from_body(&body, symbol) {
-                        return Err(BackoffError::Permanent(err));
+                        return Err(RetryError::permanent(err));
                     }
                     // Not klines and not an envelope: the body is unparseable.
-                    return Err(BackoffError::Permanent(AppError::Json(parse_err)));
+                    return Err(RetryError::permanent(AppError::Json(parse_err)));
                 }
             };
             let Some(row) = klines.first() else {
-                return Err(BackoffError::Permanent(AppError::Api {
+                return Err(RetryError::permanent(AppError::Api {
                     status: None,
                     message: format!("no klines for {u}"),
                 }));
             };
             let Some(open_time) = row.first().and_then(serde_json::Value::as_u64) else {
-                return Err(BackoffError::Permanent(AppError::Api {
+                return Err(RetryError::permanent(AppError::Api {
                     status: None,
                     message: format!("open time missing for {u}"),
                 }));
             };
             let Ok(ms) = i64::try_from(open_time) else {
-                return Err(BackoffError::Permanent(AppError::Date(format!(
+                return Err(RetryError::permanent(AppError::Date(format!(
                     "timestamp out of range: {open_time}"
                 ))));
             };
             let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) else {
-                return Err(BackoffError::Permanent(AppError::Date(format!(
+                return Err(RetryError::permanent(AppError::Date(format!(
                     "invalid timestamp: {ms}"
                 ))));
             };
@@ -208,7 +201,7 @@ async fn fetch_first_kline(
         }
     };
 
-    retry(default_backoff(), op).await
+    retry_operation(default_retry_policy(), deadline, op).await
 }
 
 /// Whether a non-success response body is Binance's "invalid symbol" envelope.
@@ -319,6 +312,39 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(First429Then200::default())
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let date = fetch_first_kline(&client, &server.uri(), "BTCUSDT", "1m")
+            .await
+            .unwrap();
+        assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+    }
+
+    #[tokio::test]
+    async fn fetch_first_kline_retries_on_408_then_succeeds() {
+        #[derive(Default)]
+        struct First408Then200 {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl wiremock::Respond for First408Then200 {
+            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+                if self
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    == 0
+                {
+                    ResponseTemplate::new(408).insert_header("Retry-After", "0")
+                } else {
+                    ResponseTemplate::new(200).set_body_string(KLINE_2024_01_01)
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(First408Then200::default())
             .mount(&server)
             .await;
 
@@ -525,7 +551,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_first_kline_date_propagates_unknown_symbol_without_network() {
+    async fn fetch_first_kline_propagates_unknown_symbol() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(

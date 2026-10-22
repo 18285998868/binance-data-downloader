@@ -22,6 +22,14 @@ license = "MIT"
 [lib]
 name = "bdd"
 
+[[bin]]
+name = "binance-data-downloader"
+path = "src/main.rs"
+
+[[bin]]
+name = "binance-data-verify"
+path = "src/bin/verify.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "signal"] }
@@ -36,7 +44,11 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "2"
 anyhow = "1"
-backoff = { version = "0.4", features = ["tokio"] }
+# Retry scheduling: backon supplies the exponential schedule and Tokio sleep
+# integration; `src/backoff.rs` adds the `Retry-After` override and deadline.
+backon = { version = "1.6", default-features = false, features = ["std", "tokio-sleep"] }
+# Parallel verification in the independent `binance-data-verify` binary.
+rayon = "1.12"
 redb = "4"
 # Parses the S3 bucket listing that tells us the first archive file of a
 # symbol/timeframe. A real XML parser rather than a hand-rolled scanner: the

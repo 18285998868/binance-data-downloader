@@ -17,9 +17,10 @@
 //! coarser timeframe request days that were never published — 404s that the
 //! `not_found_pct_threshold` would then rightly read as a broken run.
 //!
-//! The API keeps a job of its own: it proves the symbol **exists**. An archive
-//! file proves it too, so a rate-limited API only matters when the archive
-//! has nothing either.
+//! The API keeps a job of its own: it proves the symbol **exists**. A transient
+//! API failure only matters when the archive has nothing either; an explicit
+//! `-1121 unknown symbol` response remains a hard failure so typos cannot
+//! masquerade as success.
 
 use std::collections::HashMap;
 
@@ -70,6 +71,8 @@ impl StartDateResolution {
     }
 
     /// The symbols that fell back to `config.start`, with the date they use.
+    ///
+    /// Sorted so callers never inherit `HashMap` iteration order.
     pub(crate) fn degraded(&self) -> Vec<(String, Timeframe, chrono::NaiveDate)> {
         let mut out = Vec::new();
         for (symbol, by_timeframe) in &self.dates {
@@ -79,6 +82,7 @@ impl StartDateResolution {
                 }
             }
         }
+        out.sort();
         out
     }
 }
@@ -98,8 +102,9 @@ const START_DATE_FETCH_CONCURRENCY: usize = 8;
 /// `symbols` is passed in rather than recomputed: [`AppConfig::normalized_symbols`]
 /// allocates and sorts a fresh vector on every call.
 ///
-/// The phase observes `cancel`: a Ctrl-C stops new lookups from being issued
-/// instead of waiting for every pending request to finish.
+/// The phase observes `cancel`: a Ctrl-C stops new lookups and drops the
+/// pending stream, which also cancels the in-flight fapi/archive requests
+/// instead of waiting for their timeouts.
 pub(crate) async fn resolve_start_dates(
     client: &reqwest::Client,
     cache: &Cache,
@@ -183,9 +188,7 @@ pub(crate) async fn resolve_start_dates(
                 // cannot masquerade as success.
                 let error = api.expect_err("the arm matches an error");
                 tracing::error!(symbol = %sym, error = ?error, "start-date fetch failed");
-                if out.errors.len() < MAX_BATCH_ERRORS {
-                    out.errors.push(format!("{sym}/*: {error}"));
-                }
+                out.errors.push(format!("{sym}/*: {error}"));
                 out.failed.push(sym);
             }
             Err(error) => {
@@ -224,15 +227,18 @@ pub(crate) async fn resolve_start_dates(
                     // Nothing known for at least one timeframe and no
                     // fallback: the symbol is skipped entirely.
                     tracing::error!(symbol = %sym, error = ?error, "start-date fetch failed");
-                    if out.errors.len() < MAX_BATCH_ERRORS {
-                        out.errors.push(format!("{sym}/*: {error}"));
-                    }
+                    out.errors.push(format!("{sym}/*: {error}"));
                     out.failed.push(sym);
                 }
             }
         }
     }
 
+    // Symbols complete out of order (`buffer_unordered`); sort before taking
+    // the cap so which 20 details survive does not depend on completion order.
+    out.failed.sort();
+    out.errors.sort();
+    out.errors.truncate(MAX_BATCH_ERRORS);
     out
 }
 

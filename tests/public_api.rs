@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use bdd::{AppError, Cli, run};
+use bdd::{AppError, Cli, run, verify_zip};
 
 #[tokio::test]
 async fn run_reports_a_missing_config_file() {
@@ -117,4 +117,28 @@ fn app_error_from_io_preserves_the_source() {
         err.source().is_some(),
         "Io variant must keep a source chain"
     );
+}
+
+#[test]
+fn verify_zip_is_available_to_embedders() {
+    let dir = tempfile::tempdir().unwrap();
+    let valid = dir.path().join("valid.zip");
+    let mut data = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut data));
+        writer
+            .start_file("row.csv", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut writer, b"a,b\n").unwrap();
+        writer.finish().unwrap();
+    }
+    std::fs::write(&valid, data).unwrap();
+    verify_zip(&valid).unwrap();
+
+    let broken = dir.path().join("broken.zip");
+    std::fs::write(&broken, b"not a zip").unwrap();
+    assert!(matches!(verify_zip(&broken), Err(AppError::Data(_))));
+
+    let missing = dir.path().join("missing.zip");
+    assert!(matches!(verify_zip(&missing), Err(AppError::Io(_))));
 }

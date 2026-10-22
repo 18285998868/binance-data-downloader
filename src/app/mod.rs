@@ -84,7 +84,7 @@ impl RunOptions {
 ///
 /// 1. Load config
 /// 2. Scan existing local files (once)
-/// 3. Resolve one start date per symbol
+/// 3. Resolve one start date per (symbol, timeframe)
 /// 4. Iterate symbol (serial) → timeframe (serial), downloading missing files
 ///
 /// # Errors
@@ -124,13 +124,17 @@ pub async fn run_with_options(config_path: &Path, options: &RunOptions) -> Resul
     // every in-flight download, so a long batch stops promptly.
     let cancel = CancelToken::new();
     let cancel_task = cancel.clone();
-    tokio::spawn(async move {
+    let ctrl_c = tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             tracing::warn!("cancellation requested; stopping in-flight downloads");
             cancel_task.cancel();
         }
     });
-    run_inner(config_path, Endpoints::live(), cancel, options).await
+    let result = run_inner(config_path, Endpoints::live(), cancel, options).await;
+    // Do not leave a signal-handling task behind when the library is used by a
+    // long-lived host process.
+    ctrl_c.abort();
+    result
 }
 
 /// Test-only entry point: the same pipeline, redirected at a mock exchange.
@@ -144,6 +148,28 @@ pub(crate) async fn run_with_endpoints(
     cancel: CancelToken,
 ) -> Result<(), AppError> {
     run_inner(config_path, endpoints, cancel, &RunOptions::default()).await
+}
+
+/// Build the shared HTTP client.
+///
+/// Timeouts matter for the retry window: `read_timeout` only bounds one read,
+/// while `timeout` bounds a whole request, including a server that dribbles a
+/// byte every 59 seconds. The retry budget is separate (see
+/// [`crate::backoff::RETRY_WINDOW`]).
+fn build_client() -> Result<reqwest::Client, AppError> {
+    let client = reqwest::Client::builder()
+        .user_agent("binance-data-downloader/0.1")
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(60))
+        // A whole-request timeout, on top of the per-read one: a server that
+        // trickles a byte every 59 seconds never trips the read timeout and
+        // would hold a concurrency slot forever. Five minutes is generous for
+        // any legitimate archive.
+        .timeout(REQUEST_TIMEOUT)
+        .pool_max_idle_per_host(256)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build()?;
+    Ok(client)
 }
 
 /// The pipeline body, with its two external dependencies passed in.
@@ -162,18 +188,7 @@ async fn run_inner(
 
     let cache = crate::cache::Cache::new(&cfg.output_dir);
 
-    let client = reqwest::Client::builder()
-        .user_agent("binance-data-downloader/0.1")
-        .connect_timeout(Duration::from_secs(10))
-        .read_timeout(Duration::from_secs(60))
-        // A whole-request timeout, on top of the per-read one: a server that
-        // trickles a byte every 59 seconds never trips the read timeout and
-        // would hold a concurrency slot forever. Five minutes is generous for
-        // any legitimate archive.
-        .timeout(REQUEST_TIMEOUT)
-        .pool_max_idle_per_host(256)
-        .pool_idle_timeout(Duration::from_secs(30))
-        .build()?;
+    let client = build_client()?;
 
     let local = crate::scan::scan_local_files(&cfg.output_dir).await?;
 
@@ -212,11 +227,7 @@ async fn run_inner(
         );
     }
 
-    let mut failed_pairs = 0;
     let mut errors = Vec::new();
-    let mut totals = download::DownloadStats::default();
-    let mut tracker = ConsecutiveFailureTracker::new(MAX_CONSECUTIVE_PAIR_FAILURES);
-    let mut aborted_early = false;
 
     // One start date per (symbol, timeframe), resolved up front.
     let mut resolution = start_dates::resolve_start_dates(
@@ -231,70 +242,37 @@ async fn run_inner(
     .await;
     let degraded = resolution.degraded();
     let degraded_count = degraded.len();
+    let resolved_count: usize = resolution
+        .dates
+        .values()
+        .map(std::collections::HashMap::len)
+        .sum();
     errors.extend(std::mem::take(&mut resolution.errors));
     tracing::info!(
-        resolved = resolution.dates.len() * cfg.timeframe.len() - degraded_count,
+        resolved = resolved_count.saturating_sub(degraded_count),
         failed = resolution.failed.len(),
         degraded = degraded_count,
         total = symbols.len() * cfg.timeframe.len(),
         "start-dates resolved",
     );
 
-    'pairs: for symbol in symbols {
-        for timeframe in &cfg.timeframe {
-            // The check lives here, at the pair level: a Ctrl-C must stop the
-            // *next* pair, not merely the next symbol. A symbol may have a
-            // dozen timeframes, each of them thousands of files.
-            if cancel.is_cancelled() {
-                aborted_early = true;
-                tracing::warn!("cancellation requested, stopping after current pair");
-                break 'pairs;
-            }
-            let Some(sym_start) = resolution.get(&symbol, *timeframe) else {
-                // The symbol could not be resolved at all: it is counted in
-                // `resolution.failed`, and its pairs are skipped.
-                continue;
-            };
-            tracing::info!(symbol = %symbol, timeframe = %timeframe, "running pair");
-            let ctx = PairCtx {
-                sym_start: sym_start.date(),
-                end,
-                cfg: &cfg,
-                local: &local,
-                endpoints: endpoints.clone(),
-                concurrency,
-            };
-            match run_one(&client, &symbol, *timeframe, &ctx, &cancel, options).await {
-                Ok(stats) => {
-                    // A pair that was cancelled is not a success: it must not
-                    // reset the consecutive-failure breaker.
-                    if stats.cancelled == 0 {
-                        tracker.record_success();
-                    }
-                    totals.absorb(stats);
-                }
-                Err(download::DownloadFailure { stats, error }) => {
-                    // The stats gathered before the failure still belong to the
-                    // batch: dropping them would silently shrink both the
-                    // totals and the 404 ratio.
-                    totals.absorb(stats);
-                    failed_pairs += 1;
-                    tracing::error!(symbol = %symbol, timeframe = %timeframe, error = ?error, "pair failed");
-                    if errors.len() < MAX_BATCH_ERRORS {
-                        errors.push(format!("{symbol}/{timeframe}: {error}"));
-                    }
-                    if tracker.record_failure() {
-                        aborted_early = true;
-                        tracing::error!(
-                            consecutive = MAX_CONSECUTIVE_PAIR_FAILURES,
-                            "aborting batch: too many consecutive pair failures (likely a systemic outage); rerun later to resume",
-                        );
-                        break 'pairs;
-                    }
-                }
-            }
-        }
-    }
+    let pair_summary = run_pairs(
+        &client,
+        &cfg,
+        &symbols,
+        &resolution,
+        &local,
+        concurrency,
+        end,
+        &endpoints,
+        &cancel,
+        options,
+    )
+    .await;
+    let totals = pair_summary.totals;
+    let failed_pairs = pair_summary.failed_pairs;
+    errors.extend(pair_summary.errors);
+    let aborted_early = pair_summary.aborted_early;
 
     if totals.not_found > 0 {
         // 404s are tolerated by design and never change the exit code; they are
@@ -302,6 +280,7 @@ async fn run_inner(
         tracing::warn!(
             not_found = totals.not_found,
             total = totals.total,
+            done = totals.done(),
             pct = totals.not_found_pct(),
             "files not found on the server (404, expected for edge dates; investigate if unexpected)",
         );
@@ -326,10 +305,15 @@ async fn run_inner(
     let total_failures = resolution.failed.len() + failed_pairs;
     // A configured not-found threshold turns "too many files were missing"
     // into a failure, so a partially-covered archive cannot pass unnoticed.
+    // A pair cancelled midway has only a partial sample: applying the threshold
+    // to it would turn Ctrl-C into a failure just because some early dates were
+    // 404. Completed pairs still use their full sample.
+    let partial_cancelled = cancel.is_cancelled() && totals.done() < totals.total;
     let not_found_pct = totals.not_found_pct();
-    let too_many_not_found = cfg
-        .not_found_pct_threshold
-        .is_some_and(|threshold| not_found_pct >= threshold);
+    let too_many_not_found = !partial_cancelled
+        && cfg
+            .not_found_pct_threshold
+            .is_some_and(|threshold| not_found_pct >= threshold);
     if total_failures == 0 && !too_many_not_found {
         if cancel.is_cancelled() {
             tracing::warn!("run cancelled by user; rerun to resume where it stopped");
@@ -386,6 +370,98 @@ const MAX_BATCH_ERRORS: usize = 20;
 /// A server that trickles a byte every 59 seconds never trips the read
 /// timeout; without a total timeout it would hold a concurrency slot forever.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Totals and diagnostics collected while running the symbol/timeframe loop.
+struct PairBatchSummary {
+    totals: download::DownloadStats,
+    failed_pairs: usize,
+    errors: Vec<String>,
+    aborted_early: bool,
+}
+
+/// Run every symbol/timeframe pair, absorbing completed work even when a pair
+/// fails or the run is cancelled.
+#[allow(clippy::too_many_arguments)]
+async fn run_pairs(
+    client: &reqwest::Client,
+    cfg: &AppConfig,
+    symbols: &[String],
+    resolution: &start_dates::StartDateResolution,
+    local: &LocalFileSet,
+    concurrency: usize,
+    end: chrono::NaiveDate,
+    endpoints: &Endpoints,
+    cancel: &CancelToken,
+    options: &RunOptions,
+) -> PairBatchSummary {
+    let mut summary = PairBatchSummary {
+        totals: download::DownloadStats::default(),
+        failed_pairs: 0,
+        errors: Vec::new(),
+        aborted_early: false,
+    };
+    let mut tracker = ConsecutiveFailureTracker::new(MAX_CONSECUTIVE_PAIR_FAILURES);
+
+    'pairs: for symbol in symbols {
+        for timeframe in &cfg.timeframe {
+            // The check lives here, at the pair level: a Ctrl-C must stop the
+            // *next* pair, not merely the next symbol. A symbol may have a
+            // dozen timeframes, each of them thousands of files.
+            if cancel.is_cancelled() {
+                summary.aborted_early = true;
+                tracing::warn!("cancellation requested, stopping after current pair");
+                break 'pairs;
+            }
+            let Some(sym_start) = resolution.get(symbol, *timeframe) else {
+                // The symbol could not be resolved at all: it is counted in
+                // `resolution.failed`, and its pairs are skipped.
+                continue;
+            };
+            tracing::info!(symbol = %symbol, timeframe = %timeframe, "running pair");
+            let ctx = PairCtx {
+                sym_start: sym_start.date(),
+                end,
+                cfg,
+                local,
+                endpoints: endpoints.clone(),
+                concurrency,
+            };
+            match run_one(client, symbol, *timeframe, &ctx, cancel, options).await {
+                Ok(stats) => {
+                    // A pair that was cancelled is not a success: it must not
+                    // reset the consecutive-failure breaker.
+                    if stats.cancelled == 0 {
+                        tracker.record_success();
+                    }
+                    summary.totals.absorb(stats);
+                }
+                Err(download::DownloadFailure { stats, error }) => {
+                    // The stats gathered before the failure still belong to the
+                    // batch: dropping them would silently shrink both the
+                    // totals and the 404 ratio.
+                    summary.totals.absorb(stats);
+                    summary.failed_pairs += 1;
+                    tracing::error!(symbol = %symbol, timeframe = %timeframe, error = ?error, "pair failed");
+                    if summary.errors.len() < MAX_BATCH_ERRORS {
+                        summary
+                            .errors
+                            .push(format!("{symbol}/{timeframe}: {error}"));
+                    }
+                    if tracker.record_failure() {
+                        summary.aborted_early = true;
+                        tracing::error!(
+                            consecutive = MAX_CONSECUTIVE_PAIR_FAILURES,
+                            "aborting batch: too many consecutive pair failures (likely a systemic outage); rerun later to resume",
+                        );
+                        break 'pairs;
+                    }
+                }
+            }
+        }
+    }
+
+    summary
+}
 
 /// Abort the batch after this many consecutive pair failures.
 ///
@@ -1231,6 +1307,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancelled_run_does_not_apply_the_not_found_threshold_to_a_partial_sample() {
+        /// Records that the first (404) request was answered.
+        struct First404 {
+            seen: Arc<AtomicUsize>,
+        }
+        impl wiremock::Respond for First404 {
+            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+                self.seen.fetch_add(1, Ordering::Relaxed);
+                ResponseTemplate::new(404)
+            }
+        }
+
+        // One 404 is observed, then the next (slow) request is cancelled. The
+        // partial sample is 1/3 = 33%, above the 10% threshold, but Ctrl-C is
+        // not a coverage failure and must not turn the run into an error.
+        let (endpoints, server) = mock_exchange().await;
+        mock_fapi(
+            &server,
+            "BTCUSDT",
+            ResponseTemplate::new(200).set_body_string(KLINE),
+        )
+        .await;
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path(
+                "/data/futures/um/daily/klines/BTCUSDT/1d/BTCUSDT-1d-2020-01-01.zip",
+            ))
+            .respond_with(First404 { seen: seen.clone() })
+            .mount(&server)
+            .await;
+        mock_archive_path(
+            &server,
+            "/data/futures/um/daily/klines/BTCUSDT/1d/BTCUSDT-1d-2020-01-02.zip",
+            ResponseTemplate::new(200)
+                .set_body_bytes(ZIP)
+                .set_delay(std::time::Duration::from_secs(30)),
+        )
+        .await;
+        mock_archive_path(
+            &server,
+            "/data/futures/um/daily/klines/BTCUSDT/1d/BTCUSDT-1d-2020-01-03.zip",
+            ResponseTemplate::new(404),
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_config(
+            dir.path(),
+            &format!(
+                "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1d\"]\nstart = \"2020-01-01\"\n\
+                 end = \"2020-01-03\"\nconcurrency = 1\nnot_found_pct_threshold = 10.0\n\
+                 output_dir = \"{}\"\n",
+                dir.path().join("out").display()
+            ),
+        );
+
+        let cancel = CancelToken::new();
+        let signaller = cancel.clone();
+        tokio::spawn(async move {
+            while seen.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            // Give the first 404 time to be folded into `DownloadStats` before
+            // cancelling, so the regression is about the partial sample, not a
+            // race with the first response.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            signaller.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_with_endpoints(&cfg, endpoints, cancel),
+        )
+        .await
+        .expect("cancellation must stop the slow second download");
+        result.unwrap();
+    }
+
+    #[tokio::test]
     async fn run_succeeds_when_the_not_found_share_stays_below_the_threshold() {
         // The same 50% of missing files, but the threshold is not reached: the
         // run still succeeds, as before.
@@ -1348,8 +1504,8 @@ mod tests {
     #[tokio::test]
     async fn run_starts_no_pair_when_the_token_is_already_cancelled() {
         // The token is cancelled before the run starts: the pair loop must not
-        // schedule anything. (The start-date pre-flight is not cancel-aware,
-        // so the fapi lookup still happens.)
+        // schedule anything. The pre-flight also observes the token and exits
+        // without resolving a start date first.
         let (endpoints, server) = mock_exchange().await;
         mock_fapi(
             &server,

@@ -9,8 +9,9 @@ use crate::AppError;
 
 /// Scan `data_dir` for existing `.zip` files.
 /// Also removes stale tmp files this tool created (`{name}.zip.{pid}.tmp`)
-/// during the same walk, except those that belong to a still-running process
-/// (see [`has_live_owner`]). Foreign `.tmp` files are left alone.
+/// during the same walk, except those modified recently enough to be an
+/// in-flight download (see [`has_live_owner`]). Foreign `.tmp` files are left
+/// alone.
 ///
 /// Returns 128-bit hashes of the relative paths (see [`rel_path_hash`])
 /// rather than the paths themselves: the set can hold millions of entries
@@ -397,11 +398,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_keeps_tmp_files_of_live_processes() {
+    async fn scan_keeps_recent_tmp_files() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("binance/data/um/daily/klines/BTCUSDT/1m");
         std::fs::create_dir_all(&data).unwrap();
-        // Our own PID is definitely alive: simulate our in-flight download.
+        // Freshly written: inside the liveness window, so it is treated as an
+        // in-flight download regardless of the PID recorded in the name.
         let live = data.join(format!(
             "BTCUSDT-1m-2024-01-01.zip.{}.tmp",
             std::process::id()

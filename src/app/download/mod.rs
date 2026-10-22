@@ -68,14 +68,19 @@ impl DownloadStats {
         self.cancelled += other.cancelled;
     }
 
-    /// `not_found` as a percentage of `total` (0.0 when nothing ran).
+    /// `not_found` as a percentage of terminal outcomes (0.0 when none ran).
+    ///
+    /// Using [`Self::done`] rather than `total` keeps the rate meaningful when
+    /// a run is interrupted: tasks that never started must not dilute the
+    /// not-found share of the tasks that did finish.
     #[must_use]
     #[allow(clippy::cast_precision_loss)] // file counts stay far below 2^53
     pub(crate) fn not_found_pct(&self) -> f64 {
-        if self.total == 0 {
+        let done = self.done();
+        if done == 0 {
             0.0
         } else {
-            100.0 * (self.not_found as f64) / (self.total as f64)
+            100.0 * (self.not_found as f64) / (done as f64)
         }
     }
 }
@@ -484,15 +489,15 @@ mod tests {
     // — DownloadStats —
 
     #[test]
-    fn stats_done_sums_the_three_outcome_buckets() {
+    fn stats_done_sums_all_outcome_buckets() {
         let stats = DownloadStats {
-            total: 9,
+            total: 10,
             ok: 3,
             not_found: 4,
             failed: 2,
-            cancelled: 0,
+            cancelled: 1,
         };
-        assert_eq!(stats.done(), 9);
+        assert_eq!(stats.done(), 10);
         assert_eq!(DownloadStats::default().done(), 0);
     }
 
@@ -510,12 +515,13 @@ mod tests {
             ok: 5,
             not_found: 0,
             failed: 0,
-            cancelled: 0,
+            cancelled: 1,
         });
         assert_eq!(a.total, 15);
         assert_eq!(a.ok, 13);
         assert_eq!(a.not_found, 1);
         assert_eq!(a.failed, 1);
+        assert_eq!(a.cancelled, 1);
     }
 
     #[test]
@@ -529,6 +535,28 @@ mod tests {
         };
         assert!((stats.not_found_pct() - 25.0).abs() < f64::EPSILON);
         assert_eq!(DownloadStats::default().not_found_pct(), 0.0);
+    }
+
+    #[test]
+    fn stats_not_found_pct_uses_terminal_outcomes() {
+        let stats = DownloadStats {
+            total: 20,
+            ok: 4,
+            not_found: 5,
+            failed: 1,
+            cancelled: 0,
+        };
+        // `done` is 10, not `total` (20): five not-found out of ten finished.
+        assert!((stats.not_found_pct() - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn stats_not_found_pct_is_zero_before_any_outcome() {
+        let stats = DownloadStats {
+            total: 20,
+            ..DownloadStats::default()
+        };
+        assert_eq!(stats.not_found_pct(), 0.0);
     }
 
     // — DownloadFailure —

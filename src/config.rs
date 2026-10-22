@@ -213,6 +213,9 @@ impl AppConfig {
         if self.timeframe.is_empty() {
             return Err(err("timeframe must contain at least one timeframe".into()));
         }
+        if self.output_dir.as_os_str().is_empty() {
+            return Err(err("output_dir must not be empty".into()));
+        }
         if self.concurrency == 0 {
             return Err(err("concurrency must be greater than zero".into()));
         }
@@ -326,6 +329,13 @@ mod tests {
         assert_eq!(cfg.start, None);
         assert_eq!(cfg.end, None);
         assert_eq!(cfg.output_dir, PathBuf::from("data"));
+    }
+
+    #[test]
+    fn empty_output_dir_is_rejected() {
+        let err =
+            load("symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\"]\noutput_dir = \"\"").unwrap_err();
+        assert!(err.to_string().contains("output_dir"), "got {err}");
     }
 
     #[test]

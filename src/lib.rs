@@ -7,11 +7,14 @@
 //! and the repository README can never drift apart.
 //!
 //! Module layout: `app/` holds the pipeline (`urls`, `tasks`,
-//! `download/`); supporting modules are `backoff`, `cache`, `cancel`,
-//! `lock`, `start_date` and `scan`.
+//! `download/`, `start_dates`); supporting modules are `archive`, `backoff`,
+//! `cache`, `cancel`, `cli`, `config`, `error`, `limits`, `lock`,
+//! `start_date`, `scan` and `verify`. The `binance-data-verify` binary lives
+//! in `src/bin/` and shares [`verify_zip`] with the download pipeline.
 //!
-//! The modules are an implementation detail; the public surface is
-//! [`run`], [`Cli`] and [`AppError`].
+//! The modules are an implementation detail; the public surface is [`run`],
+//! [`run_with_options`], [`RunOptions`], [`Cli`], [`verify_zip`], [`AppError`]
+//! and [`FailureReport`].
 
 #![doc = include_str!("../README.md")]
 
@@ -27,7 +30,9 @@ mod limits;
 mod lock;
 mod scan;
 mod start_date;
+mod verify;
 
 pub use app::{RunOptions, run, run_with_options};
 pub use cli::Cli;
 pub use error::{AppError, FailureReport};
+pub use verify::verify_zip;

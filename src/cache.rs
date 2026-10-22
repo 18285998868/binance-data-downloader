@@ -31,7 +31,7 @@ type DbCell = Arc<OnceLock<Arc<Database>>>;
 #[derive(Clone)]
 pub(crate) struct Cache {
     base: PathBuf,
-    dbs: Arc<Mutex<HashMap<String, DbCell>>>,
+    dbs: Arc<Mutex<HashMap<PathBuf, DbCell>>>,
     create_lock: Arc<Mutex<()>>,
 }
 
@@ -52,16 +52,19 @@ impl Cache {
 
     fn ensure_db(&self, domain: &str) -> Result<Arc<Database>, AppError> {
         let path = self.db_path(domain);
-        let key = path.to_string_lossy().into_owned();
 
         // Fast path: a previously initialized cell is returned without taking
-        // the creation lock.
+        // the creation lock. The key is the real `PathBuf`, not a lossy string:
+        // two distinct non-UTF-8 cache roots must not share a handle.
         let cell = {
             let mut map = self
                 .dbs
                 .lock()
                 .map_err(|e| AppError::Cache(format!("mutex poisoned: {e}")))?;
-            Arc::clone(map.entry(key).or_insert_with(|| Arc::new(OnceLock::new())))
+            Arc::clone(
+                map.entry(path.clone())
+                    .or_insert_with(|| Arc::new(OnceLock::new())),
+            )
         };
         if let Some(db) = cell.get() {
             return Ok(Arc::clone(db));
@@ -115,9 +118,14 @@ impl Cache {
         let read_tx = db
             .begin_read()
             .map_err(|e| AppError::Cache(e.to_string()))?;
-        // A table that does not exist yet is an empty cache, not a failure.
-        let Ok(table) = read_tx.open_table(TABLE) else {
-            return Ok(None);
+        // Only a missing table means "empty cache". A type mismatch or a
+        // storage/corruption error is a real cache failure and must not be
+        // reported as a miss, or a broken cache would silently turn into
+        // repeated network fetches forever.
+        let table = match read_tx.open_table(TABLE) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(AppError::Cache(format!("open table: {e}"))),
         };
         let Some(guard) = table.get(key).map_err(|e| AppError::Cache(e.to_string()))? else {
             return Ok(None);
@@ -397,6 +405,32 @@ mod tests {
             cache.read_async("d", "b", None).await.unwrap(),
             Some(b"2".to_vec())
         );
+    }
+
+    #[test]
+    fn a_schema_mismatch_is_a_cache_error_not_a_miss() {
+        // Create the same table name with a different value type. Opening it
+        // with the cache's schema fails with `TableTypeMismatch`, which must be
+        // surfaced instead of being mistaken for an empty cache.
+        const CONFLICTING: TableDefinition<&str, u64> = TableDefinition::new("data");
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path());
+        let path = cache.db_path("test_domain");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let db = Database::create(&path).unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(CONFLICTING).unwrap();
+            table.insert("k", 1u64).unwrap();
+        }
+        tx.commit().unwrap();
+        drop(db);
+
+        let err = cache.read("test_domain", "k", None).unwrap_err();
+        assert!(matches!(err, AppError::Cache(_)), "got {err:?}");
+        assert!(err.to_string().contains("open table"), "got {err}");
     }
 
     #[test]

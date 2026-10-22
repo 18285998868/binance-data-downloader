@@ -1,51 +1,172 @@
-//! Shared retry policy: the backoff schedule plus `Retry-After` handling.
+//! Shared retry policy: the backon schedule plus `Retry-After` handling.
+//!
+//! Retries are explicit and only used for idempotent GETs. Callers return
+//! [`RetryError::Transient`] for errors that may recover and
+//! [`RetryError::Permanent`] for everything else; [`retry_operation`] applies
+//! the shared deadline, schedule, `Retry-After` override and warning log.
 
-use backoff::ExponentialBackoff;
+use std::future::Future;
+use std::time::{Duration, Instant};
 
-/// Total wall-clock retry budget for a single operation.
+use backon::Retryable as _;
+
+/// Retry scheduling budget for a single operation.
 ///
-/// Enforced in three places: `max_elapsed_time` bounds the regular backoff
-/// schedule, the retried operation checks a matching deadline (hard stop),
-/// and `Retry-After` delays are clamped to the remaining window via
-/// [`clamp_retry_after`]. The extra guards are needed because `backoff`
-/// treats a `Retry-After` override as unconditional
-/// (`retry_after.or_else(|| backoff.next_backoff())`), ignoring
-/// `max_elapsed_time`: a server answering with `Retry-After` would otherwise
-/// retry forever, or sleep for as long as the header demands.
+/// Enforced in three places: the backon schedule caps cumulative sleep with
+/// `total_delay`, [`retry_operation`] clamps every delay to the remaining
+/// window, and the retried operation checks the same deadline before each
+/// attempt. This window is *not* a hard cap on one attempt: a request already
+/// in flight is bounded separately by the client's 300-second whole-request
+/// timeout. The window only controls retries between attempts.
 pub(crate) const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Exponential backoff capped at [`RETRY_WINDOW`] of total retry time.
+/// Backon's builder, re-exported under a local name so call sites do not depend
+/// on the backon API directly.
+pub(crate) use backon::ExponentialBuilder as RetryPolicy;
+
+/// Whether an HTTP status is worth retrying for an idempotent GET.
+///
+/// `408` and `429` are explicitly transient in addition to `5xx`: Binance and
+/// S3 both use them for temporary back-pressure. Other 4xx responses are
+/// permanent (a 403, for example, will not become a 200 by waiting).
 #[must_use]
-pub(crate) fn default_backoff() -> ExponentialBackoff {
-    ExponentialBackoff {
-        max_elapsed_time: Some(RETRY_WINDOW),
-        ..Default::default()
+pub(crate) fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+/// Default retry policy: 500 ms initial delay, 1.5x growth, 60 s cap, bounded
+/// by the 120 s cumulative-sleep budget.
+#[must_use]
+pub(crate) fn default_retry_policy() -> RetryPolicy {
+    RetryPolicy::new()
+        .with_min_delay(Duration::from_millis(500))
+        .with_max_delay(Duration::from_secs(60))
+        .with_factor(1.5)
+        .with_total_delay(Some(RETRY_WINDOW))
+        .without_max_times()
+}
+
+/// Policy used by tests that need exactly one attempt.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn no_retry_policy() -> RetryPolicy {
+    RetryPolicy::new()
+        .with_min_delay(Duration::ZERO)
+        .with_max_delay(Duration::ZERO)
+        .with_total_delay(Some(Duration::ZERO))
+        .with_max_times(0)
+}
+
+/// The result of one attempt, with enough metadata for the shared retry loop.
+#[derive(Debug)]
+pub(crate) enum RetryError<E> {
+    /// The operation may succeed if tried again.
+    Transient {
+        /// Underlying error.
+        err: E,
+        /// Delay requested by the server, if any.
+        retry_after: Option<Duration>,
+    },
+    /// The operation must not be retried.
+    Permanent(E),
+}
+
+impl<E> RetryError<E> {
+    /// Mark an error as retryable.
+    pub(crate) fn transient(err: E, retry_after: Option<Duration>) -> Self {
+        Self::Transient { err, retry_after }
+    }
+
+    /// Mark an error as permanent.
+    pub(crate) fn permanent(err: E) -> Self {
+        Self::Permanent(err)
     }
 }
 
-/// Parse a `Retry-After` response header in seconds form.
+/// Retry an operation with the shared policy and deadline.
 ///
-/// HTTP-date values are ignored (mapped to `None`), so callers fall back to
-/// the regular backoff schedule.
+/// `operation` must only perform idempotent work. Every delay, including a
+/// server-provided `Retry-After`, is capped at `deadline`; a permanent error
+/// stops immediately. The returned error is the underlying [`AppError`], so
+/// callers do not need to unwrap the retry wrapper.
+///
+/// # Errors
+///
+/// Returns the final underlying error when the operation is permanent or the
+/// retry budget is exhausted.
+pub(crate) async fn retry_operation<T, F, Fut>(
+    policy: RetryPolicy,
+    deadline: Instant,
+    operation: F,
+) -> Result<T, crate::AppError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, RetryError<crate::AppError>>>,
+{
+    let result = operation
+        .retry(policy)
+        .when(|error| matches!(error, RetryError::Transient { .. }))
+        .adjust(move |error, delay| {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            let retry_after = match error {
+                RetryError::Transient {
+                    retry_after: Some(delay),
+                    ..
+                } => Some(*delay),
+                RetryError::Transient { .. } | RetryError::Permanent(_) => None,
+            };
+            clamp_retry_after(retry_after.or(delay), deadline)
+        })
+        .notify(|error, delay| {
+            if let RetryError::Transient { err, .. } = error {
+                tracing::warn!(
+                    error = %err,
+                    ?delay,
+                    "request failed; retrying",
+                );
+            }
+        })
+        .await;
+
+    match result {
+        Ok(value) => Ok(value),
+        Err(RetryError::Transient { err, .. } | RetryError::Permanent(err)) => Err(err),
+    }
+}
+
+/// Parse a `Retry-After` response header.
+///
+/// Both RFC 9110 forms are accepted: delay-seconds (`Retry-After: 120`) and
+/// HTTP-date (`Retry-After: Wed, 21 Oct 2026 07:28:00 GMT`). A date in the
+/// past maps to a zero delay. A malformed or missing header returns `None`, so
+/// callers fall back to the regular backoff schedule.
 pub(crate) fn parse_retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
-    resp.headers()
+    let raw = resp
+        .headers()
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
         .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(std::time::Duration::from_secs)
+        .trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(std::time::Duration::from_secs(seconds));
+    }
+    let when = chrono::DateTime::parse_from_rfc2822(raw)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let delay = when.signed_duration_since(chrono::Utc::now());
+    Some(delay.to_std().unwrap_or(std::time::Duration::ZERO))
 }
 
-/// Clamp a server-provided `Retry-After` delay to the remaining retry window.
+/// Clamp a server-provided delay to the remaining retry window.
 ///
-/// `backoff` sleeps the full `Retry-After` value without consulting
-/// `max_elapsed_time` (see [`RETRY_WINDOW`]), so an oversized header (e.g.
-/// `Retry-After: 86400`) would otherwise stall the operation for that long.
-/// Capping the delay at `deadline - now` keeps the wall-clock budget honest;
-/// once the window is spent the next attempt short-circuits via the caller's
-/// deadline check.
+/// The shared retry loop uses this for both `Retry-After` overrides and the
+/// normal backon delay, so an oversized header (e.g. `Retry-After: 86400`)
+/// cannot stall the operation past its deadline.
 #[must_use]
 pub(crate) fn clamp_retry_after(
     retry_after: Option<std::time::Duration>,
@@ -58,6 +179,7 @@ pub(crate) fn clamp_retry_after(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -73,22 +195,104 @@ mod tests {
             .expect("the mock server must answer")
     }
 
-    #[test]
-    fn default_backoff_has_max_elapsed() {
-        let b = default_backoff();
-        assert_eq!(b.max_elapsed_time, Some(RETRY_WINDOW));
+    fn instant_policy() -> RetryPolicy {
+        RetryPolicy::new()
+            .with_min_delay(Duration::ZERO)
+            .with_max_delay(Duration::ZERO)
+            .with_total_delay(Some(Duration::from_secs(1)))
+            .with_max_times(2)
     }
 
     #[test]
-    fn default_backoff_has_initial_interval() {
-        let b = default_backoff();
-        assert!(b.initial_interval.as_millis() >= 100);
+    fn transient_statuses_cover_back_pressure_and_server_errors() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            reqwest::StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(is_transient_status(status), "{status} should be transient");
+        }
+        for status in [
+            reqwest::StatusCode::OK,
+            reqwest::StatusCode::NOT_MODIFIED,
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+        ] {
+            assert!(!is_transient_status(status), "{status} should be permanent");
+        }
     }
 
     #[test]
-    fn default_backoff_multiplication() {
-        let b = default_backoff();
-        assert!(b.multiplier > 1.0);
+    fn retry_window_is_two_minutes() {
+        assert_eq!(RETRY_WINDOW.as_secs(), 120);
+    }
+
+    #[tokio::test]
+    async fn retry_operation_retries_transient_errors_then_succeeds() {
+        let calls = AtomicUsize::new(0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let result = retry_operation(instant_policy(), deadline, || {
+            let call = calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if call < 2 {
+                    Err(RetryError::transient(
+                        crate::AppError::Api {
+                            status: Some(500),
+                            message: "transient".into(),
+                        },
+                        None,
+                    ))
+                } else {
+                    Ok(7_u8)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_operation_does_not_retry_permanent_errors() {
+        let calls = AtomicUsize::new(0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let result: Result<(), _> = retry_operation(instant_policy(), deadline, || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                Err(RetryError::permanent(crate::AppError::Api {
+                    status: Some(400),
+                    message: "permanent".into(),
+                }))
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_operation_stops_when_policy_has_no_retries() {
+        let calls = AtomicUsize::new(0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let result: Result<(), _> = retry_operation(no_retry_policy(), deadline, || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                Err(RetryError::transient(
+                    crate::AppError::Api {
+                        status: Some(500),
+                        message: "transient".into(),
+                    },
+                    None,
+                ))
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -158,14 +362,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parse_retry_after_ignores_the_http_date_form() {
-        // HTTP-date values are deliberately not parsed: the caller falls back
-        // to the regular backoff schedule.
-        let resp = response_for(
-            ResponseTemplate::new(429)
-                .insert_header("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT"),
-        )
-        .await;
-        assert_eq!(parse_retry_after(&resp), None);
+    async fn parse_retry_after_reads_a_future_http_date() {
+        let future = (chrono::Utc::now() + chrono::TimeDelta::hours(1))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let resp =
+            response_for(ResponseTemplate::new(429).insert_header("Retry-After", &future)).await;
+        let delay = parse_retry_after(&resp).expect("a future HTTP-date must be honoured");
+        assert!(
+            delay >= std::time::Duration::from_mins(59)
+                && delay <= std::time::Duration::from_mins(61),
+            "unexpected delay: {delay:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_retry_after_clamps_a_past_http_date_to_zero() {
+        let past = (chrono::Utc::now() - chrono::TimeDelta::hours(1))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let resp =
+            response_for(ResponseTemplate::new(429).insert_header("Retry-After", &past)).await;
+        assert_eq!(parse_retry_after(&resp), Some(std::time::Duration::ZERO));
     }
 }

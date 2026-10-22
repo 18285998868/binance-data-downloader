@@ -18,12 +18,13 @@
 
 use std::collections::HashMap;
 
-use backoff::Error as BackoffError;
-use backoff::future::retry;
 use futures::StreamExt;
 
 use crate::AppError;
-use crate::backoff::default_backoff;
+use crate::backoff::{
+    RETRY_WINDOW, RetryError, default_retry_policy, is_transient_status, parse_retry_after,
+    retry_operation,
+};
 use crate::cache::Cache;
 use crate::config::Timeframe;
 
@@ -64,45 +65,46 @@ pub(crate) async fn first_archive_date(
     timeframe: &str,
 ) -> Result<Option<chrono::NaiveDate>, AppError> {
     let url = listing_url(base, symbol, timeframe);
+    let deadline = std::time::Instant::now() + RETRY_WINDOW;
     let op = || {
         let c = client.clone();
         let u = url.clone();
         async move {
+            // The shared retry loop stops scheduling after the deadline; this
+            // guard also avoids starting an attempt that was queued just before
+            // the cutoff.
+            if std::time::Instant::now() >= deadline {
+                return Err(RetryError::permanent(AppError::Api {
+                    status: None,
+                    message: format!("retry window elapsed for {u}"),
+                }));
+            }
             let resp = match c.get(&u).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(BackoffError::Transient {
-                        err: AppError::from(e),
-                        retry_after: None,
-                    });
+                    return Err(RetryError::transient(AppError::from(e), None));
                 }
             };
             let status = resp.status();
-            if !status.is_success() {
+            if status != reqwest::StatusCode::OK {
                 let err = AppError::Api {
                     status: Some(status.as_u16()),
                     message: format!("HTTP {status} for {u}"),
                 };
-                return Err(if status.is_server_error() {
-                    BackoffError::Transient {
-                        err,
-                        retry_after: None,
-                    }
+                return Err(if is_transient_status(status) {
+                    RetryError::transient(err, parse_retry_after(&resp))
                 } else {
-                    BackoffError::Permanent(err)
+                    RetryError::permanent(err)
                 });
             }
             match resp.text().await {
                 Ok(body) => Ok(body),
-                Err(e) => Err(BackoffError::Transient {
-                    err: AppError::from(e),
-                    retry_after: None,
-                }),
+                Err(e) => Err(RetryError::transient(AppError::from(e), None)),
             }
         }
     };
 
-    let body = retry(default_backoff(), op).await?;
+    let body = retry_operation(default_retry_policy(), deadline, op).await?;
     parse_first_key_date(&body).map_err(|e| {
         AppError::Data(crate::error::FailureReport::new(format!(
             "archive listing is unparseable: {e}"
@@ -405,5 +407,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Api { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn first_archive_date_retries_429_then_succeeds() {
+        /// Answers 429 (+ `Retry-After`) on the first call, then a listing.
+        struct First429Then200 {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl wiremock::Respond for First429Then200 {
+            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+                if self
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    == 0
+                {
+                    ResponseTemplate::new(429).insert_header("Retry-After", "0")
+                } else {
+                    ResponseTemplate::new(200).set_body_string(listing(
+                        "data/futures/um/daily/klines/BTCUSDT/1d/BTCUSDT-1d-2019-12-31.zip",
+                    ))
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(First429Then200 {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let date = first_archive_date(&client, &server.uri(), "BTCUSDT", "1d")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2019, 12, 31).unwrap());
     }
 }
