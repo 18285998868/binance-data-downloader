@@ -1,4 +1,9 @@
-//! Resolution and caching of a symbol's first kline date via the `fapi` API.
+//! Resolution and caching of a symbol's first kline date via the market API.
+//!
+//! The `1m` klines endpoint of the configured market is used as a symbol
+//! existence check and as a lower bound for the first archive date. Spot,
+//! USDⓈ-M and COIN-M use different bases and paths; the market value selects
+//! them.
 
 use crate::AppError;
 use crate::backoff::{
@@ -6,18 +11,18 @@ use crate::backoff::{
     retry_operation,
 };
 use crate::cache::Cache;
+use crate::dataset::Market;
 
 const CACHE_DOMAIN: &str = "start_date";
-
-/// Binance USDⓈ-M futures API base. Kept as a parameter elsewhere so tests
-/// can point at a local mock server.
-pub(crate) const FAPI_BASE: &str = "https://fapi.binance.com";
 
 /// Binance error code for an unrecognised symbol.
 const UNKNOWN_SYMBOL_CODE: i64 = -1121;
 
-fn klines_url(base: &str, symbol: &str, timeframe: &str) -> String {
-    format!("{base}/fapi/v1/klines?symbol={symbol}&interval={timeframe}&limit=1&startTime=0")
+fn klines_url(base: &str, market: Market, symbol: &str, interval: &str) -> String {
+    format!(
+        "{base}{}?symbol={symbol}&interval={interval}&limit=1&startTime=0",
+        market.klines_path()
+    )
 }
 
 /// Binance error envelope, e.g. `{"code":-1121,"msg":"Invalid symbol."}`.
@@ -43,7 +48,10 @@ fn parse_cached_date(raw: &[u8]) -> Option<chrono::NaiveDate> {
 }
 
 /// Fetch (or cache-lookup, TTL 30 days, via `cache`) the earliest kline open
-/// time for a symbol/timeframe.
+/// time for a symbol.
+///
+/// The cache key includes the market: the same symbol can exist on several
+/// markets with different listing dates.
 ///
 /// # Errors
 ///
@@ -51,15 +59,15 @@ fn parse_cached_date(raw: &[u8]) -> Option<chrono::NaiveDate> {
 /// [`AppError::Api`] for other Binance API failures, and [`AppError::Date`]
 /// for unparseable timestamps. A corrupt cache entry is treated as a cache
 /// miss (warn + refetch), never an error.
-#[tracing::instrument(skip(client, cache), fields(symbol = %symbol, timeframe = %timeframe))]
+#[tracing::instrument(skip(client, cache), fields(market = %market, symbol = %symbol))]
 pub(crate) async fn get_first_kline_date(
     client: &reqwest::Client,
     cache: &Cache,
-    fapi_base: &str,
+    market: Market,
+    api_base: &str,
     symbol: &str,
-    timeframe: &str,
 ) -> Result<chrono::NaiveDate, AppError> {
-    let key = format!("{symbol}:{timeframe}");
+    let key = format!("{}:{symbol}", market.as_path());
     match cache
         .read_async(CACHE_DOMAIN, &key, Some(crate::cache::CACHE_TTL_SECS))
         .await
@@ -69,20 +77,20 @@ pub(crate) async fn get_first_kline_date(
                 return Ok(date);
             }
             tracing::warn!(
+                market = %market,
                 symbol,
-                timeframe,
                 "ignoring unreadable cached start date, refetching",
             );
         }
         Ok(None) => {}
         Err(e) => tracing::warn!(
+            market = %market,
             symbol,
-            timeframe,
             error = ?e,
             "cache read failed, treating as miss",
         ),
     }
-    let date = fetch_first_kline(client, fapi_base, symbol, timeframe).await?;
+    let date = fetch_first_kline(client, api_base, market, symbol).await?;
     if let Err(e) = cache
         .write_async(
             CACHE_DOMAIN,
@@ -91,20 +99,25 @@ pub(crate) async fn get_first_kline_date(
         )
         .await
     {
-        tracing::warn!(symbol, timeframe, error = ?e, "failed to cache start date");
+        tracing::warn!(
+            market = %market,
+            symbol,
+            error = ?e,
+            "failed to cache start date"
+        );
     }
     Ok(date)
 }
 
-/// One retried GET against `{base}/fapi/v1/klines`; `base` is injectable so
-/// tests can target a mock server.
+/// One retried GET against the market's klines endpoint; `base` is injectable
+/// so tests can target a mock server.
 async fn fetch_first_kline(
     client: &reqwest::Client,
     base: &str,
+    market: Market,
     symbol: &str,
-    timeframe: &str,
 ) -> Result<chrono::NaiveDate, AppError> {
-    let url = klines_url(base, symbol, timeframe);
+    let url = klines_url(base, market, symbol, "1m");
 
     let deadline = std::time::Instant::now() + RETRY_WINDOW;
     let op = || {
@@ -236,7 +249,8 @@ mod tests {
 
     #[test]
     fn klines_url_format() {
-        let url = klines_url(FAPI_BASE, "BTCUSDT", "1m");
+        let url = klines_url(Market::Um.api_base(), Market::Um, "BTCUSDT", "1m");
+        assert!(url.starts_with("https://fapi.binance.com/fapi/v1/klines?"));
         assert!(url.contains("BTCUSDT"));
         assert!(url.contains("interval=1m"));
         assert!(url.contains("startTime=0"));
@@ -244,15 +258,23 @@ mod tests {
     }
 
     #[test]
+    fn klines_url_uses_the_market_specific_path() {
+        let spot = klines_url(Market::Spot.api_base(), Market::Spot, "BTCUSDT", "1m");
+        assert!(spot.starts_with("https://api.binance.com/api/v3/klines?"));
+        let cm = klines_url(Market::Cm.api_base(), Market::Cm, "BTCUSD_PERP", "1m");
+        assert!(cm.starts_with("https://dapi.binance.com/dapi/v1/klines?"));
+    }
+
+    #[test]
     fn klines_url_different_symbol_timeframe() {
-        let url = klines_url(FAPI_BASE, "ETHUSDT", "5m");
+        let url = klines_url(Market::Um.api_base(), Market::Um, "ETHUSDT", "5m");
         assert!(url.contains("ETHUSDT"));
         assert!(url.contains("interval=5m"));
     }
 
     #[test]
     fn klines_url_start_time_zero() {
-        let url = klines_url(FAPI_BASE, "BTCUSDT", "1d");
+        let url = klines_url(Market::Um.api_base(), Market::Um, "BTCUSDT", "1d");
         assert!(url.contains("startTime=0"));
     }
 
@@ -265,7 +287,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let date = fetch_first_kline(&client, &server.uri(), "BTCUSDT", "1m")
+        let date = fetch_first_kline(&client, &server.uri(), Market::Um, "BTCUSDT")
             .await
             .unwrap();
         assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
@@ -283,7 +305,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let err = fetch_first_kline(&client, &server.uri(), "NOPEUSDT", "1m")
+        let err = fetch_first_kline(&client, &server.uri(), Market::Um, "NOPEUSDT")
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::UnknownSymbol { .. }));
@@ -316,7 +338,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let date = fetch_first_kline(&client, &server.uri(), "BTCUSDT", "1m")
+        let date = fetch_first_kline(&client, &server.uri(), Market::Um, "BTCUSDT")
             .await
             .unwrap();
         assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
@@ -349,7 +371,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let date = fetch_first_kline(&client, &server.uri(), "BTCUSDT", "1m")
+        let date = fetch_first_kline(&client, &server.uri(), Market::Um, "BTCUSDT")
             .await
             .unwrap();
         assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
@@ -364,7 +386,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let err = fetch_first_kline(&client, &server.uri(), "BTCUSDT", "1m")
+        let err = fetch_first_kline(&client, &server.uri(), Market::Um, "BTCUSDT")
             .await
             .unwrap_err();
         // An unparseable body is neither klines nor an error envelope, so it
@@ -411,7 +433,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let err = fetch_first_kline(&client, &server.uri(), "BTCUSDT", "1m")
+        let err = fetch_first_kline(&client, &server.uri(), Market::Um, "BTCUSDT")
             .await
             .unwrap_err();
         match err {
@@ -440,7 +462,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let err = fetch_first_kline(&client, &server.uri(), "NOPEUSDT", "1m")
+        let err = fetch_first_kline(&client, &server.uri(), Market::Um, "NOPEUSDT")
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::UnknownSymbol { .. }), "got {err:?}");
@@ -468,7 +490,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let err = fetch_first_kline(&client, &server.uri(), "BTCUSDT", "1m")
+        let err = fetch_first_kline(&client, &server.uri(), Market::Um, "BTCUSDT")
             .await
             .unwrap_err();
         match err {
@@ -486,7 +508,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let err = fetch_first_kline(&client, &server.uri(), "BTCUSDT", "1m")
+        let err = fetch_first_kline(&client, &server.uri(), Market::Um, "BTCUSDT")
             .await
             .unwrap_err();
         match err {
@@ -523,7 +545,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let date = fetch_first_kline(&client, &server.uri(), "BTCUSDT", "1m")
+        let date = fetch_first_kline(&client, &server.uri(), Market::Um, "BTCUSDT")
             .await
             .unwrap();
         assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
@@ -534,7 +556,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::new(dir.path());
         cache
-            .write_async(CACHE_DOMAIN, "BTCUSDT:1m", b"2024-01-01")
+            .write_async(CACHE_DOMAIN, "futures/um:BTCUSDT", b"2024-01-01")
             .await
             .unwrap();
 
@@ -544,9 +566,15 @@ mod tests {
             .connect_timeout(std::time::Duration::from_millis(50))
             .build()
             .unwrap();
-        let date = get_first_kline_date(&client, &cache, FAPI_BASE, "BTCUSDT", "1m")
-            .await
-            .unwrap();
+        let date = get_first_kline_date(
+            &client,
+            &cache,
+            Market::Um,
+            Market::Um.api_base(),
+            "BTCUSDT",
+        )
+        .await
+        .unwrap();
         assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
     }
 
@@ -562,7 +590,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let err = fetch_first_kline(&client, &server.uri(), "NOPEUSDT", "1m")
+        let err = fetch_first_kline(&client, &server.uri(), Market::Um, "NOPEUSDT")
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::UnknownSymbol { .. }));

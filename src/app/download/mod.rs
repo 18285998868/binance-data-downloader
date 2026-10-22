@@ -169,7 +169,7 @@ where
     let mut stream = stream_iter(tasks)
         .map(|t| {
             let c = client.clone();
-            let span = tracing::info_span!("download", pair = %t.pair, tf = %t.timeframe);
+            let span = tracing::info_span!("download", pair = %t.pair, job = %t.job);
             let fut = download_fn(c, t);
             fut.instrument(span)
         })
@@ -589,7 +589,11 @@ mod tests {
             url: format!("http://example.com/{pair}"),
             dest: std::path::PathBuf::from("/tmp"),
             pair: pair.into(),
-            timeframe: crate::config::Timeframe::M1,
+            job: crate::dataset::DownloadJob {
+                kind: crate::dataset::DatasetKind::Klines,
+                interval: Some(crate::dataset::Interval::M1),
+                period: crate::dataset::Period::Daily,
+            },
         }
     }
 }

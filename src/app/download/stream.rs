@@ -350,6 +350,16 @@ mod tests {
         crate::backoff::no_retry_policy()
     }
 
+    fn m1_job() -> crate::dataset::DownloadJob {
+        use crate::dataset::{DatasetKind, Interval, Period};
+
+        crate::dataset::DownloadJob {
+            kind: DatasetKind::Klines,
+            interval: Some(Interval::M1),
+            period: Period::Daily,
+        }
+    }
+
     fn make_task(server: &MockServer, dir: &std::path::Path) -> DownloadTask {
         DownloadTask {
             url: format!(
@@ -358,7 +368,7 @@ mod tests {
             ),
             dest: dir.join("BTCUSDT-1m-2024-01-01.zip"),
             pair: "BTCUSDT".into(),
-            timeframe: crate::config::Timeframe::M1,
+            job: m1_job(),
         }
     }
 
@@ -670,7 +680,7 @@ mod tests {
             url: format!("{}/whatever.zip", server.uri()),
             dest: dest.clone(),
             pair: "BTCUSDT".into(),
-            timeframe: crate::config::Timeframe::M1,
+            job: m1_job(),
         };
         let client = reqwest::Client::new();
         let cancel = CancelToken::new();
@@ -966,7 +976,7 @@ mod tests {
             url: format!("{base}/split.zip"),
             dest: dir.path().join("split.zip"),
             pair: "BTCUSDT".into(),
-            timeframe: crate::config::Timeframe::M1,
+            job: m1_job(),
         };
         download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
             .await
@@ -985,7 +995,7 @@ mod tests {
             url: format!("{base}/drip.zip"),
             dest: dir.path().join("drip.zip"),
             pair: "BTCUSDT".into(),
-            timeframe: crate::config::Timeframe::M1,
+            job: m1_job(),
         };
         download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
             .await
@@ -1004,7 +1014,7 @@ mod tests {
             url: format!("{base}/html.zip"),
             dest: dir.path().join("html.zip"),
             pair: "BTCUSDT".into(),
-            timeframe: crate::config::Timeframe::M1,
+            job: m1_job(),
         };
         let result =
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)

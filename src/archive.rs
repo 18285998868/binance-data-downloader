@@ -1,20 +1,20 @@
-//! The archive's own bucket listing: when did a symbol/timeframe start?
+//! The archive's own bucket listing: when did a symbol/job start?
 //!
 //! `data.binance.vision` is an S3 bucket, and the bucket listing answers
-//! "which files exist?" directly. The first key under a symbol/timeframe
-//! prefix is therefore the **first day the archive actually has data for** —
-//! the exact bound the downloader needs, and the only way to avoid requesting
-//! days that were never published.
+//! "which files exist?" directly. The first key under a symbol/job prefix is
+//! therefore the **first day the archive actually has data for** — the exact
+//! bound the downloader needs, and the only way to avoid requesting days that
+//! were never published.
 //!
-//! Why this matters: the `fapi` API reports the symbol's *first kline* date,
+//! Why this matters: the exchange API reports the symbol's *first kline* date,
 //! which for the oldest symbols predates the archive by months (BTCUSDT's first
 //! kline is 2019-09-08, while its first archive file — of *every* timeframe —
 //! is 2019-12-31). Starting from the API's date therefore requests ~114 days
 //! per symbol that are guaranteed to 404.
 //!
 //! An empty listing is **not** an error: it means the archive holds no file
-//! for that symbol/timeframe *yet* (a freshly listed symbol), which is a
-//! normal state and not the same as "the symbol does not exist".
+//! for that symbol/job *yet* (a freshly listed symbol), which is a normal state
+//! and not the same as "the symbol does not exist".
 
 use std::collections::HashMap;
 
@@ -26,10 +26,7 @@ use crate::backoff::{
     retry_operation,
 };
 use crate::cache::Cache;
-use crate::config::Timeframe;
-
-/// Prefix of the USDⓈ-M daily klines inside the archive bucket.
-pub(crate) const KLINES_PREFIX: &str = "data/futures/um/daily/klines";
+use crate::dataset::{DownloadJob, Market, Period};
 
 /// The bucket's public endpoint. Kept as a parameter elsewhere so tests can
 /// point the whole pipeline at a mock server.
@@ -41,15 +38,15 @@ const CACHE_DOMAIN: &str = "archive_start";
 /// How many listing requests one symbol issues at a time.
 const FETCH_CONCURRENCY: usize = 4;
 
-/// Build the bucket-listing URL for one symbol/timeframe.
+/// Build the bucket-listing URL for one symbol/job prefix.
 ///
 /// `max-keys=1` is deliberate: S3 lists keys in binary order, so the single
 /// returned key is the *earliest* file. One request, ~650 bytes of XML.
-fn listing_url(base: &str, symbol: &str, timeframe: &str) -> String {
-    format!("{base}?delimiter=/&max-keys=1&prefix={KLINES_PREFIX}/{symbol}/{timeframe}/")
+fn listing_url(base: &str, prefix: &str) -> String {
+    format!("{base}?delimiter=/&max-keys=1&prefix={prefix}")
 }
 
-/// The first day the archive holds a file for `symbol`/`timeframe`.
+/// The first day the archive holds a file under `prefix`.
 ///
 /// Returns `Ok(None)` when the archive holds no file for it yet.
 ///
@@ -61,10 +58,10 @@ fn listing_url(base: &str, symbol: &str, timeframe: &str) -> String {
 pub(crate) async fn first_archive_date(
     client: &reqwest::Client,
     base: &str,
-    symbol: &str,
-    timeframe: &str,
+    prefix: &str,
+    period: Period,
 ) -> Result<Option<chrono::NaiveDate>, AppError> {
-    let url = listing_url(base, symbol, timeframe);
+    let url = listing_url(base, prefix);
     let deadline = std::time::Instant::now() + RETRY_WINDOW;
     let op = || {
         let c = client.clone();
@@ -105,7 +102,7 @@ pub(crate) async fn first_archive_date(
     };
 
     let body = retry_operation(default_retry_policy(), deadline, op).await?;
-    parse_first_key_date(&body).map_err(|e| {
+    parse_first_key_date(&body, period).map_err(|e| {
         AppError::Data(crate::error::FailureReport::new(format!(
             "archive listing is unparseable: {e}"
         )))
@@ -115,7 +112,7 @@ pub(crate) async fn first_archive_date(
 /// Extract the date of the first `<Key>` of an S3 listing.
 ///
 /// `Ok(None)` means the listing holds no key at all.
-fn parse_first_key_date(body: &str) -> Result<Option<chrono::NaiveDate>, String> {
+fn parse_first_key_date(body: &str, period: Period) -> Result<Option<chrono::NaiveDate>, String> {
     let doc = roxmltree::Document::parse(body).map_err(|e| e.to_string())?;
     let Some(key) = doc
         .descendants()
@@ -124,71 +121,64 @@ fn parse_first_key_date(body: &str) -> Result<Option<chrono::NaiveDate>, String>
     else {
         return Ok(None);
     };
-    date_from_archive_key(key).map(Some)
+    date_from_archive_key(key, period).map(Some)
 }
 
-/// Extract `YYYY-MM-DD` from an archive key such as
-/// `data/.../BTCUSDT_250926-1d-2024-01-01.zip`.
+/// Extract the date from an archive key such as
+/// `data/.../BTCUSDT_250926-1d-2024-01-01.zip` (daily) or
+/// `data/.../BTCUSDT-fundingRate-2024-01.zip` (monthly).
 ///
 /// The symbol charset is `[A-Za-z0-9_]` (validated in the config), so the date
-/// is always the last three dash-separated components of the file name.
-fn date_from_archive_key(key: &str) -> Result<chrono::NaiveDate, String> {
+/// is always the last three (daily) or two (monthly) dash-separated components.
+fn date_from_archive_key(key: &str, period: Period) -> Result<chrono::NaiveDate, String> {
     let name = key.rsplit('/').next().unwrap_or(key);
     let stem = name
         .strip_suffix(".zip")
         .ok_or_else(|| format!("not a zip key: {key}"))?;
-    let mut parts = stem.rsplit('-');
-    let mut next = |what: &str| -> Result<&str, String> {
-        parts
-            .next()
-            .ok_or_else(|| format!("no {what} in archive key: {key}"))
-    };
-    let day = next("day")?;
-    let month = next("month")?;
-    let year = next("year")?;
-    let date = format!("{year}-{month}-{day}");
-    chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+    period
+        .parse_key_date(stem)
         .map_err(|e| format!("bad date in archive key {key}: {e}"))
 }
 
-/// The first day the archive holds a file, per requested timeframe.
+/// The first day the archive holds a file, per requested job.
 ///
-/// One lookup per timeframe, each cached for 30 days. `None` means the
-/// archive holds no file for that timeframe *yet* — a normal state for a
-/// freshly listed symbol, and not the same as "the symbol does not exist".
+/// One lookup per job, each cached for 30 days. `None` means the archive holds
+/// no file for that job *yet* — a normal state for a freshly listed symbol, and
+/// not the same as "the symbol does not exist".
 pub(crate) async fn archive_dates(
     client: &reqwest::Client,
     cache: &Cache,
     s3_base: &str,
+    market: Market,
     symbol: &str,
-    timeframes: &[Timeframe],
-) -> HashMap<Timeframe, Option<chrono::NaiveDate>> {
-    let mut pending = futures::stream::iter(timeframes.iter().copied())
-        .map(|tf| {
+    jobs: &[DownloadJob],
+) -> HashMap<DownloadJob, Option<chrono::NaiveDate>> {
+    let mut pending = futures::stream::iter(jobs.iter().copied())
+        .map(|job| {
             let c = client.clone();
             let cache = cache.clone();
             let base = s3_base.to_owned();
             let sym = symbol.to_owned();
             async move {
                 (
-                    tf,
-                    cached_first_archive_date(&c, &cache, &base, &sym, tf).await,
+                    job,
+                    cached_first_archive_date(&c, &cache, &base, market, &sym, job).await,
                 )
             }
         })
         .buffer_unordered(FETCH_CONCURRENCY);
 
-    let mut dates = HashMap::with_capacity(timeframes.len());
+    let mut dates = HashMap::with_capacity(jobs.len());
     let mut to_cache: Vec<(String, Vec<u8>)> = Vec::new();
-    while let Some((timeframe, looked_up)) = pending.next().await {
-        dates.insert(timeframe, looked_up.date);
+    while let Some((job, looked_up)) = pending.next().await {
+        dates.insert(job, looked_up.date);
         if let Some(entry) = looked_up.pending {
             to_cache.push(entry);
         }
     }
 
-    // One transaction for the whole symbol: a fresh run resolves every
-    // timeframe, and one fsync per entry would dominate the pre-flight.
+    // One transaction for the whole symbol: a fresh run resolves every job,
+    // and one fsync per entry would dominate the pre-flight.
     if !to_cache.is_empty()
         && let Err(e) = cache.write_many_async(CACHE_DOMAIN, &to_cache).await
     {
@@ -206,7 +196,7 @@ struct ArchiveDate {
     pending: Option<(String, Vec<u8>)>,
 }
 
-/// The first archive date of one symbol/timeframe, cached for 30 days.
+/// The first archive date of one symbol/job, cached for 30 days.
 ///
 /// `date` is `None` when the archive holds no file yet **or** when the listing
 /// could not be read. The former is deliberately *not* cached: the archive
@@ -215,10 +205,11 @@ async fn cached_first_archive_date(
     client: &reqwest::Client,
     cache: &Cache,
     s3_base: &str,
+    market: Market,
     symbol: &str,
-    timeframe: Timeframe,
+    job: DownloadJob,
 ) -> ArchiveDate {
-    let key = format!("{symbol}:{timeframe}");
+    let key = format!("{}:{job}:{symbol}", market.as_path());
     match cache
         .read_async(CACHE_DOMAIN, &key, Some(crate::cache::CACHE_TTL_SECS))
         .await
@@ -231,21 +222,24 @@ async fn cached_first_archive_date(
                 };
             }
             tracing::warn!(
+                market = %market,
                 symbol,
-                timeframe = %timeframe,
+                job = %job,
                 "ignoring unreadable cached archive date, refetching",
             );
         }
         Ok(None) => {}
         Err(e) => tracing::warn!(
+            market = %market,
             symbol,
-            timeframe = %timeframe,
+            job = %job,
             error = ?e,
             "archive-date cache read failed, treating as miss",
         ),
     }
 
-    match first_archive_date(client, s3_base, symbol, timeframe.as_str()).await {
+    let prefix = format!("{}/", job.relative_dir(market, symbol));
+    match first_archive_date(client, s3_base, &prefix, job.period).await {
         Ok(Some(date)) => {
             let payload = date.format("%Y-%m-%d").to_string().into_bytes();
             ArchiveDate {
@@ -259,8 +253,9 @@ async fn cached_first_archive_date(
         },
         Err(e) => {
             tracing::warn!(
+                market = %market,
                 symbol,
-                timeframe = %timeframe,
+                job = %job,
                 error = ?e,
                 "archive listing failed; keeping the API-derived start date",
             );
@@ -282,8 +277,21 @@ fn parse_cached_date(raw: &[u8]) -> Option<chrono::NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataset::{DatasetKind, Interval};
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn date(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn daily_klines() -> DownloadJob {
+        DownloadJob {
+            kind: DatasetKind::Klines,
+            interval: Some(Interval::D1),
+            period: Period::Daily,
+        }
+    }
 
     /// A listing holding one key, as S3 answers `max-keys=1`.
     fn listing(key: &str) -> String {
@@ -311,52 +319,64 @@ mod tests {
 
     #[test]
     fn listing_url_encodes_the_prefix_and_caps_the_page() {
-        let url = listing_url(S3_BASE, "BTCUSDT", "1d");
+        let prefix = "data/futures/um/daily/klines/BTCUSDT/1d/";
+        let url = listing_url(S3_BASE, prefix);
         assert!(url.starts_with(S3_BASE));
-        assert!(url.contains("prefix=data/futures/um/daily/klines/BTCUSDT/1d/"));
+        assert!(url.contains(&format!("prefix={prefix}")));
         // `max-keys=1` is what keeps the listing to a single, earliest key.
         assert!(url.contains("max-keys=1"));
     }
 
     #[test]
-    fn parses_the_date_of_the_first_key() {
-        let date = parse_first_key_date(&listing(
-            "data/futures/um/daily/klines/BTCUSDT/1d/BTCUSDT-1d-2019-12-31.zip",
-        ))
-        .unwrap()
-        .unwrap();
-        assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2019, 12, 31).unwrap());
+    fn parses_the_date_of_the_first_daily_key() {
+        let body = listing("data/futures/um/daily/klines/BTCUSDT/1d/BTCUSDT-1d-2019-12-31.zip");
+        let parsed = parse_first_key_date(&body, Period::Daily).unwrap().unwrap();
+        assert_eq!(parsed, date(2019, 12, 31));
+    }
+
+    #[test]
+    fn parses_the_month_of_the_first_monthly_key() {
+        let body =
+            listing("data/futures/um/monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2024-01.zip");
+        let parsed = parse_first_key_date(&body, Period::Monthly)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed, date(2024, 1, 1));
     }
 
     #[test]
     fn an_empty_listing_yields_no_date() {
-        assert_eq!(parse_first_key_date(EMPTY_LISTING).unwrap(), None);
+        assert_eq!(
+            parse_first_key_date(EMPTY_LISTING, Period::Daily).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn a_malformed_body_is_an_error() {
-        assert!(parse_first_key_date("not xml at all").is_err());
+        assert!(parse_first_key_date("not xml at all", Period::Daily).is_err());
     }
 
     #[test]
     fn a_key_without_a_zip_suffix_is_an_error() {
-        assert!(date_from_archive_key("data/x/BTCUSDT-1d-2019-12-31.txt").is_err());
+        assert!(date_from_archive_key("data/x/BTCUSDT-1d-2019-12-31.txt", Period::Daily).is_err());
     }
 
     #[test]
     fn a_key_with_a_non_date_tail_is_an_error() {
-        assert!(date_from_archive_key("data/x/BTCUSDT-1d-nope.zip").is_err());
+        assert!(date_from_archive_key("data/x/BTCUSDT-1d-nope.zip", Period::Daily).is_err());
     }
 
     #[test]
     fn quarterly_contract_symbols_are_parsed() {
         // The symbol charset allows `_`, so the date is still the last three
         // dash-separated components.
-        let date = date_from_archive_key(
+        let parsed = date_from_archive_key(
             "data/futures/um/daily/klines/BTCUSDT_250926/1d/BTCUSDT_250926-1d-2024-09-26.zip",
+            Period::Daily,
         )
         .unwrap();
-        assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2024, 9, 26).unwrap());
+        assert_eq!(parsed, date(2024, 9, 26));
     }
 
     #[tokio::test]
@@ -370,11 +390,16 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let date = first_archive_date(&client, &server.uri(), "BTCUSDT", "1d")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2019, 12, 31).unwrap());
+        let parsed = first_archive_date(
+            &client,
+            &server.uri(),
+            "data/futures/um/daily/klines/BTCUSDT/1d/",
+            Period::Daily,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed, date(2019, 12, 31));
     }
 
     #[tokio::test]
@@ -387,9 +412,14 @@ mod tests {
 
         let client = reqwest::Client::new();
         assert_eq!(
-            first_archive_date(&client, &server.uri(), "NEWUSDT", "1d")
-                .await
-                .unwrap(),
+            first_archive_date(
+                &client,
+                &server.uri(),
+                "data/futures/um/daily/klines/NEWUSDT/1d/",
+                Period::Daily,
+            )
+            .await
+            .unwrap(),
             None
         );
     }
@@ -403,9 +433,14 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let err = first_archive_date(&client, &server.uri(), "BTCUSDT", "1d")
-            .await
-            .unwrap_err();
+        let err = first_archive_date(
+            &client,
+            &server.uri(),
+            "data/futures/um/daily/klines/BTCUSDT/1d/",
+            Period::Daily,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, AppError::Api { .. }), "got {err:?}");
     }
 
@@ -440,10 +475,41 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let date = first_archive_date(&client, &server.uri(), "BTCUSDT", "1d")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2019, 12, 31).unwrap());
+        let parsed = first_archive_date(
+            &client,
+            &server.uri(),
+            "data/futures/um/daily/klines/BTCUSDT/1d/",
+            Period::Daily,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed, date(2019, 12, 31));
+    }
+
+    #[tokio::test]
+    async fn archive_dates_keys_results_by_job() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(listing(
+                "data/futures/um/daily/klines/BTCUSDT/1d/BTCUSDT-1d-2019-12-31.zip",
+            )))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cache_dir.path());
+        let job = daily_klines();
+        let dates = archive_dates(
+            &client,
+            &cache,
+            &server.uri(),
+            Market::Um,
+            "BTCUSDT",
+            &[job],
+        )
+        .await;
+        assert_eq!(dates.get(&job).copied().flatten(), Some(date(2019, 12, 31)));
     }
 }

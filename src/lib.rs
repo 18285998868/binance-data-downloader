@@ -1,14 +1,16 @@
-//! Binance Futures daily kline downloader.
+//! Binance public data archive downloader for spot, USDⓈ-M and COIN-M.
 //!
-//! Downloads historical kline data from Binance's public data archive
-//! and saves as zip files.
+//! Downloads any of the eleven archive datasets (aggTrades, trades, klines,
+//! bookDepth, bookTicker, fundingRate, liquidationSnapshot, metrics and the
+//! three futures price-kline families) and saves the zip files in a tree that
+//! mirrors the web page path exactly.
 //!
 //! The crate documentation is the project README, so that the published docs
 //! and the repository README can never drift apart.
 //!
 //! Module layout: `app/` holds the pipeline (`urls`, `tasks`,
 //! `download/`, `start_dates`); supporting modules are `archive`, `backoff`,
-//! `cache`, `cancel`, `cli`, `config`, `error`, `limits`, `lock`,
+//! `cache`, `cancel`, `cli`, `config`, `dataset`, `error`, `limits`, `lock`,
 //! `start_date`, `scan` and `verify`. The `binance-data-verify` binary lives
 //! in `src/bin/` and shares [`verify_zip`] with the download pipeline.
 //!
@@ -25,6 +27,7 @@ mod cache;
 mod cancel;
 mod cli;
 mod config;
+mod dataset;
 mod error;
 mod limits;
 mod lock;

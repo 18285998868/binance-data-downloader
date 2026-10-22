@@ -1,28 +1,88 @@
-# 配置说明: 全部字段以小写字母开头
+# Binance Public Data 下载配置
 #
-# 目录约定 (重要): output_dir 是数据**根目录**, 程序会自动在其下追加
-#   binance/data/um/daily/klines/{symbol}/{timeframe}/{symbol}-{timeframe}-{date}.zip
-# 因此不要把 binance/data/um/daily/klines 写进 output_dir, 否则会生成重复的嵌套目录:
-#   错误: output_dir = "/data/binance/data/um/daily/klines"
-#         → /data/binance/data/um/daily/klines/binance/data/um/daily/klines/...
-#   正确: output_dir = "/data"
-#         → /data/binance/data/um/daily/klines/...
+# 目录约定（重要）：
+#   output_dir 是网页 data/ 的父目录，程序严格拼接：
+#   {output_dir}/data/{spot|futures/um|futures/cm}/{daily|monthly}/{type}/...
 #
-symbol = ["BTCUSDT"] # 下载的交易对列表, 必填, 自动转大写并排序去重
-timeframe = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"] # K线周期, 必填, 默认值: 无, 可选参数: ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d"]
-# start = "2020-01-01" # 开始时间, 可选, 默认值: 无, 可选参数: YYYY-MM-DD
-# end = "2025-01-01" # 结束时间, 可选, 默认值: 昨天, 可选参数: YYYY-MM-DD
-# output_dir = "data" # 数据根目录(不含 binance/data/um/daily/klines), 可选, 默认值: "data", 可选参数: 任意目录路径
-# concurrency = 64 # 每个 (symbol × timeframe) 配对内的最大并发下载数, 可选, 默认值: 64, 可选参数: 正整数(0 < c ≤ 1024)
-# not_found_pct_threshold = 50.0 # 本轮 404 占比阈值(百分比), 可选, 默认值: 无(=404 永不改变退出码), 可选参数: 0 < t ≤ 100
+#   正确：output_dir = "/data/binance"
+#         → /data/binance/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-02.zip
+#   错误：output_dir = "/data/binance/data/futures/um"
+#         → /data/binance/data/futures/um/data/futures/um/...
+#
+# 旧版本路径 data/um/... 不再兼容；请先把旧数据移动到 data/futures/um/...
 
-# 完整示例: 8 币 × 12 周期补全到最新
+market = "futures/um" # 必填: spot | futures/um | futures/cm（也接受 um / cm 简写）
+symbol = ["BTCUSDT"]  # 必填: 非空, 字符集 [A-Za-z0-9_]；运行时转大写、排序去重
+
+# start = "2020-01-01"        # 可选: 缺省=每个 job 自己的归档首日
+# end = "2025-01-01"          # 可选: 缺省昨天；未来值截到昨天
+# output_dir = "/data/binance" # 可选: data/ 的父目录；缺省 "."
+# concurrency = 64            # 可选: 0 < c ≤ 1024；单个 pair 内最大并发
+# not_found_pct_threshold = 50.0 # 可选: 0 < t ≤ 100；404 占比达到 t 判失败
+
+# K 线类：必须提供 intervals。
+#   spot daily: 1s..1d；spot monthly: 1s..1mo
+#   um/cm daily: 1m..1d；um/cm monthly: 1m..1mo
+[[dataset]]
+type = "klines"
+periods = ["daily"] # daily | monthly，可同时写
+intervals = ["1m", "1d"]
+
+# 其他 10 种数据集：按需取消注释。
+# 非 K 线类数据集禁止写 intervals。
+#
+# [[dataset]]
+# type = "aggTrades"    # spot / um / cm；daily / monthly
+# periods = ["daily"]
+#
+# [[dataset]]
+# type = "trades"       # spot / um / cm；daily / monthly
+# periods = ["daily"]
+#
+# [[dataset]]
+# type = "bookDepth"    # um / cm；仅 daily
+# periods = ["daily"]
+#
+# [[dataset]]
+# type = "bookTicker"   # um / cm；daily / monthly
+# periods = ["daily"]
+#
+# [[dataset]]
+# type = "fundingRate"  # um / cm；仅 monthly（注意：没有日档）
+# periods = ["monthly"]
+#
+# [[dataset]]
+# type = "liquidationSnapshot" # 仅 cm；仅 daily
+# periods = ["daily"]
+#
+# [[dataset]]
+# type = "metrics"      # um / cm；仅 daily
+# periods = ["daily"]
+#
+# [[dataset]]
+# type = "indexPriceKlines" # um / cm；daily / monthly
+# # 注意：该数据集按标的指数存放。配置 BTCUSD_PERP 时归档/本地路径是 .../BTCUSD/...
+# # 同一标的的永续与季度合约不要同时配置此数据集（会落到同一路径，校验会拒绝）。
+# periods = ["daily", "monthly"]
+# intervals = ["1m"]
+#
+# [[dataset]]
+# type = "markPriceKlines"  # um / cm；daily / monthly
+# periods = ["daily", "monthly"]
+# intervals = ["1m"]
+#
+# [[dataset]]
+# type = "premiumIndexKlines" # um / cm；daily / monthly
+# periods = ["daily", "monthly"]
+# intervals = ["1m"]
+
+# 完整示例：8 币 × 主流 K 线，补全到最新
 # symbol = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "LINKUSDT"]
-# timeframe = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
 # start = "2020-01-01"
 # end = "2026-09-30"
 # output_dir = "/data/nutilustrader/data"
-# concurrency = 64
 #
-# 说明: 程序按 (symbol × timeframe) 串行处理每个配对, 配对内并发下载;
-#       已存在的 .zip 会跳过, 故本配置可用于增量补全, 重复执行安全。
+# 说明：
+# - 程序按 symbol × job 串行处理，job 内并发下载；
+# - 已存在的 .zip 会跳过，重复执行安全；
+# - 月档只下载完整月份。

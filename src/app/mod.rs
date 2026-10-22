@@ -10,7 +10,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::AppError;
-use crate::config::{AppConfig, Timeframe};
+use crate::config::AppConfig;
+use crate::dataset::{DownloadJob, Market};
 
 use crate::cancel::CancelToken;
 use crate::lock::RunLock;
@@ -27,28 +28,45 @@ use crate::scan::LocalFileSet;
 pub(crate) struct Endpoints {
     /// Base of the public data archive.
     pub(crate) archive_files: Cow<'static, str>,
-    /// Base of the Binance USDⓈ-M futures API.
-    pub(crate) exchange_api: Cow<'static, str>,
+    /// Base of the spot API.
+    pub(crate) exchange_api_spot: Cow<'static, str>,
+    /// Base of the USDⓈ-M futures API.
+    pub(crate) exchange_api_um: Cow<'static, str>,
+    /// Base of the COIN-M futures API.
+    pub(crate) exchange_api_cm: Cow<'static, str>,
     /// Base of the archive bucket's S3 endpoint, used for its listing.
     pub(crate) archive_listing: Cow<'static, str>,
 }
 
 impl Endpoints {
-    /// The real `data.binance.vision` and `fapi.binance.com`.
+    /// The real exchanges and `data.binance.vision`.
     pub(crate) fn live() -> Self {
         Self {
             archive_files: Cow::Borrowed(urls::ARCHIVE_BASE),
-            exchange_api: Cow::Borrowed(crate::start_date::FAPI_BASE),
+            exchange_api_spot: Cow::Borrowed(Market::Spot.api_base()),
+            exchange_api_um: Cow::Borrowed(Market::Um.api_base()),
+            exchange_api_cm: Cow::Borrowed(Market::Cm.api_base()),
             archive_listing: Cow::Borrowed(crate::archive::S3_BASE),
         }
     }
 
-    /// Both bases pointed at one mock server.
+    /// The API base for one market (overridable by tests).
+    pub(crate) fn exchange_api(&self, market: Market) -> &str {
+        match market {
+            Market::Spot => &self.exchange_api_spot,
+            Market::Um => &self.exchange_api_um,
+            Market::Cm => &self.exchange_api_cm,
+        }
+    }
+
+    /// All bases pointed at one mock server.
     #[cfg(test)]
     pub(crate) fn for_tests(base: String) -> Self {
         Self {
             archive_files: Cow::Owned(base.clone()),
-            exchange_api: Cow::Owned(base.clone()),
+            exchange_api_spot: Cow::Owned(base.clone()),
+            exchange_api_um: Cow::Owned(base.clone()),
+            exchange_api_cm: Cow::Owned(base.clone()),
             archive_listing: Cow::Owned(base),
         }
     }
@@ -84,14 +102,14 @@ impl RunOptions {
 ///
 /// 1. Load config
 /// 2. Scan existing local files (once)
-/// 3. Resolve one start date per (symbol, timeframe)
-/// 4. Iterate symbol (serial) → timeframe (serial), downloading missing files
+/// 3. Resolve one start date per (symbol, job)
+/// 4. Iterate symbol (serial) → job (serial), downloading missing files
 ///
 /// # Errors
 ///
 /// Returns [`AppError`] when the config is invalid, another run already holds
-/// the output directory, or one or more symbol/timeframe pairs fail (the
-/// summary lists up to 20 failures). The batch aborts early after a run of
+/// the output directory, or one or more symbol/job pairs fail (the summary
+/// lists up to 20 failures). The batch aborts early after a run of
 /// consecutive pair failures (likely a systemic outage) instead of retrying
 /// every remaining pair.
 ///
@@ -104,7 +122,7 @@ impl RunOptions {
 /// use std::path::Path;
 ///
 /// # async fn demo() -> Result<(), bdd::AppError> {
-/// // Downloads every symbol/timeframe pair declared in `config.toml` into the
+/// // Downloads every symbol/job pair declared in `config.toml` into the
 /// // configured output directory, skipping the files already on disk.
 /// bdd::run(Path::new("config.toml")).await?;
 /// # Ok(())
@@ -209,10 +227,12 @@ async fn run_inner(
     let end = cfg.resolved_end(chrono::Utc::now().date_naive());
 
     let symbols = cfg.normalized_symbols();
+    let jobs = cfg.jobs();
     tracing::info!(
+        market = %cfg.market,
         symbols = symbols.len(),
-        timeframes = cfg.timeframe.len(),
-        total = symbols.len() * cfg.timeframe.len(),
+        jobs = jobs.len(),
+        total = symbols.len() * jobs.len(),
         concurrency,
         local_files = local.len(),
         "starting batch download",
@@ -222,22 +242,16 @@ async fn run_inner(
         tracing::info!(
             count = symbols.len(),
             "the first start-date of every symbol is resolved up front -- one request to \
-             the Binance API and one bucket listing per timeframe -- and cached for 30 days; \
+             the market API and one bucket listing per job -- and cached for 30 days; \
              this can take a while on a fresh run",
         );
     }
 
     let mut errors = Vec::new();
 
-    // One start date per (symbol, timeframe), resolved up front.
+    // One start date per (symbol, job), resolved up front.
     let mut resolution = start_dates::resolve_start_dates(
-        &client,
-        &cache,
-        &cfg,
-        &symbols,
-        &cfg.timeframe,
-        &endpoints,
-        &cancel,
+        &client, &cache, &cfg, &symbols, &jobs, &endpoints, &cancel,
     )
     .await;
     let degraded = resolution.degraded();
@@ -252,7 +266,7 @@ async fn run_inner(
         resolved = resolved_count.saturating_sub(degraded_count),
         failed = resolution.failed.len(),
         degraded = degraded_count,
-        total = symbols.len() * cfg.timeframe.len(),
+        total = symbols.len() * jobs.len(),
         "start-dates resolved",
     );
 
@@ -260,6 +274,7 @@ async fn run_inner(
         &client,
         &cfg,
         &symbols,
+        &jobs,
         &resolution,
         &local,
         concurrency,
@@ -286,18 +301,18 @@ async fn run_inner(
         );
     }
 
-    // A degraded (symbol, timeframe) is NOT a failure: the run continued from
+    // A degraded (symbol, job) is NOT a failure: the run continued from
     // `config.start`. It is called out explicitly so partial coverage is never
     // mistaken for a clean result.
     let degraded: Vec<String> = degraded
         .iter()
-        .map(|(symbol, timeframe, start)| format!("{symbol}/{timeframe}@{start}"))
+        .map(|(symbol, job, start)| format!("{symbol}/{job}@{start}"))
         .collect();
     if !degraded.is_empty() {
         tracing::warn!(
             count = degraded.len(),
             detail = degraded.join(", "),
-            "start-date lookup failed for these symbol/timeframe pairs; fell back to config \
+            "start-date lookup failed for these symbol/job pairs; fell back to config \
              start — their earliest days may be missing",
         );
     }
@@ -371,7 +386,7 @@ const MAX_BATCH_ERRORS: usize = 20;
 /// timeout; without a total timeout it would hold a concurrency slot forever.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Totals and diagnostics collected while running the symbol/timeframe loop.
+/// Totals and diagnostics collected while running the symbol/job loop.
 struct PairBatchSummary {
     totals: download::DownloadStats,
     failed_pairs: usize,
@@ -379,13 +394,14 @@ struct PairBatchSummary {
     aborted_early: bool,
 }
 
-/// Run every symbol/timeframe pair, absorbing completed work even when a pair
+/// Run every symbol/job pair, absorbing completed work even when a pair
 /// fails or the run is cancelled.
 #[allow(clippy::too_many_arguments)]
 async fn run_pairs(
     client: &reqwest::Client,
     cfg: &AppConfig,
     symbols: &[String],
+    jobs: &[DownloadJob],
     resolution: &start_dates::StartDateResolution,
     local: &LocalFileSet,
     concurrency: usize,
@@ -403,21 +419,21 @@ async fn run_pairs(
     let mut tracker = ConsecutiveFailureTracker::new(MAX_CONSECUTIVE_PAIR_FAILURES);
 
     'pairs: for symbol in symbols {
-        for timeframe in &cfg.timeframe {
+        for job in jobs {
             // The check lives here, at the pair level: a Ctrl-C must stop the
-            // *next* pair, not merely the next symbol. A symbol may have a
-            // dozen timeframes, each of them thousands of files.
+            // *next* pair, not merely the next symbol. A symbol may have
+            // dozens of jobs, each of them thousands of files.
             if cancel.is_cancelled() {
                 summary.aborted_early = true;
                 tracing::warn!("cancellation requested, stopping after current pair");
                 break 'pairs;
             }
-            let Some(sym_start) = resolution.get(symbol, *timeframe) else {
+            let Some(sym_start) = resolution.get(symbol, *job) else {
                 // The symbol could not be resolved at all: it is counted in
                 // `resolution.failed`, and its pairs are skipped.
                 continue;
             };
-            tracing::info!(symbol = %symbol, timeframe = %timeframe, "running pair");
+            tracing::info!(symbol = %symbol, job = %job, "running pair");
             let ctx = PairCtx {
                 sym_start: sym_start.date(),
                 end,
@@ -426,7 +442,7 @@ async fn run_pairs(
                 endpoints: endpoints.clone(),
                 concurrency,
             };
-            match run_one(client, symbol, *timeframe, &ctx, cancel, options).await {
+            match run_one(client, symbol, *job, &ctx, cancel, options).await {
                 Ok(stats) => {
                     // A pair that was cancelled is not a success: it must not
                     // reset the consecutive-failure breaker.
@@ -441,11 +457,9 @@ async fn run_pairs(
                     // totals and the 404 ratio.
                     summary.totals.absorb(stats);
                     summary.failed_pairs += 1;
-                    tracing::error!(symbol = %symbol, timeframe = %timeframe, error = ?error, "pair failed");
+                    tracing::error!(symbol = %symbol, job = %job, error = ?error, "pair failed");
                     if summary.errors.len() < MAX_BATCH_ERRORS {
-                        summary
-                            .errors
-                            .push(format!("{symbol}/{timeframe}: {error}"));
+                        summary.errors.push(format!("{symbol}/{job}: {error}"));
                     }
                     if tracker.record_failure() {
                         summary.aborted_early = true;
@@ -508,7 +522,7 @@ struct PairCtx<'a> {
     concurrency: usize,
 }
 
-/// Download one symbol/timeframe pair.
+/// Download one symbol/job pair.
 ///
 /// Returns the per-pair download stats (all zero when the pair was skipped).
 /// A failure still reports what the pair managed to download, so the batch
@@ -518,36 +532,30 @@ struct PairCtx<'a> {
 ///
 /// Returns [`download::DownloadFailure`] when at least one file in the pair
 /// fails to download.
-#[tracing::instrument(skip(client, ctx, cancel, options), fields(symbol = %symbol, timeframe = %timeframe))]
+#[tracing::instrument(
+    skip(client, ctx, cancel, options),
+    fields(market = %ctx.cfg.market, symbol = %symbol, job = %job)
+)]
 async fn run_one(
     client: &reqwest::Client,
     symbol: &str,
-    timeframe: Timeframe,
+    job: DownloadJob,
     ctx: &PairCtx<'_>,
     cancel: &CancelToken,
     options: &RunOptions,
 ) -> Result<download::DownloadStats, download::DownloadFailure> {
-    if let Some(cfg_start) = ctx.cfg.start
-        && cfg_start > ctx.end
-    {
+    // Monthly jobs align down to the first day of the month and stop at the
+    // last *complete* month; daily jobs use the resolved day range as-is.
+    let raw_start = start_dates::resolve_start(ctx.cfg.start, ctx.sym_start);
+    let start = job.period.start_of_period(raw_start);
+    let end = job.period.last_complete_start(ctx.end);
+
+    if start > end {
         tracing::warn!(
             symbol = %symbol,
-            timeframe = %timeframe,
-            start = %cfg_start,
-            end = %ctx.end,
-            "config start after end date, skipping",
-        );
-        return Ok(download::DownloadStats::default());
-    }
-
-    let start = start_dates::resolve_start(ctx.cfg.start, ctx.sym_start);
-
-    if start > ctx.end {
-        tracing::warn!(
-            symbol = %symbol,
-            timeframe = %timeframe,
-            start = %start,
-            end = %ctx.end,
+            job = %job,
+            start = %raw_start,
+            end = %end,
             "start date after end date, skipping",
         );
         return Ok(download::DownloadStats::default());
@@ -555,16 +563,20 @@ async fn run_one(
 
     tracing::info!(
         symbol = %symbol,
-        timeframe = %timeframe,
+        job = %job,
         start = %start,
-        end = %ctx.end,
-        "processing symbol-timeframe pair",
+        end = %end,
+        "processing symbol/job pair",
     );
 
+    // `end` is already normalized for logging and the skip check above;
+    // `Period::dates` normalizes its own end argument, so passing `ctx.end`
+    // (the raw, inclusive end) avoids applying the monthly rule twice.
     let tasks = tasks::build_download_tasks(
         &ctx.endpoints.archive_files,
+        ctx.cfg.market,
         symbol,
-        timeframe,
+        job,
         start,
         ctx.end,
         ctx.local,
@@ -574,9 +586,9 @@ async fn run_one(
     if tasks.is_empty() {
         tracing::debug!(
             symbol = %symbol,
-            timeframe = %timeframe,
+            job = %job,
             start = %start,
-            end = %ctx.end,
+            end = %end,
             "no files to download, all cached or out of range",
         );
         return Ok(download::DownloadStats::default());
@@ -585,7 +597,7 @@ async fn run_one(
     tracing::debug!(
         files = tasks.len(),
         start = %start,
-        end = %ctx.end,
+        end = %end,
         "downloading all",
     );
     let result =
@@ -598,7 +610,7 @@ async fn run_one(
     };
     tracing::info!(
         symbol = %symbol,
-        timeframe = %timeframe,
+        job = %job,
         ok = stats.ok,
         not_found = stats.not_found,
         failed = stats.failed,
@@ -618,7 +630,8 @@ mod tests {
     use super::start_dates::{SymbolStart, resolve_start_dates};
     use super::{ConsecutiveFailureTracker, Endpoints, run_with_endpoints};
     use crate::cancel::CancelToken;
-    use crate::config::AppConfig;
+    use crate::config::{AppConfig, DatasetConfig};
+    use crate::dataset::{DatasetKind, DownloadJob, Interval, Market, Period};
     use crate::{AppError, lock::RunLock};
     use std::path::Path;
     use std::sync::Arc;
@@ -725,14 +738,35 @@ mod tests {
         write_config(
             dir,
             &format!(
-                "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1d\"]\n{start}end = \"2020-01-01\"\noutput_dir = \"{}\"\n",
+                "market = \"futures/um\"\nsymbol = [\"BTCUSDT\"]\n{start}end = \"2020-01-01\"\n\
+                 output_dir = \"{}\"\n\n\
+                 [[dataset]]\ntype = \"klines\"\nperiods = [\"daily\"]\nintervals = [\"1d\"]\n",
                 dir.join("out").display()
             ),
         )
     }
 
-    fn downloaded(dir: &Path) -> Vec<String> {
-        let root = dir.join("out/binance/data/um/daily/klines/BTCUSDT/1d");
+    fn klines_dataset(intervals: &[Interval]) -> DatasetConfig {
+        DatasetConfig {
+            kind: DatasetKind::Klines,
+            periods: vec![Period::Daily],
+            intervals: intervals.to_vec(),
+        }
+    }
+
+    fn d1_job() -> DownloadJob {
+        DownloadJob {
+            kind: DatasetKind::Klines,
+            interval: Some(Interval::D1),
+            period: Period::Daily,
+        }
+    }
+
+    fn downloaded_under(dir: &Path, segments: &[&str]) -> Vec<String> {
+        let mut root = dir.join("out");
+        for segment in segments {
+            root.push(segment);
+        }
         let mut v: Vec<String> = std::fs::read_dir(&root)
             .map(|rd| {
                 rd.filter_map(Result::ok)
@@ -742,6 +776,13 @@ mod tests {
             .unwrap_or_default();
         v.sort();
         v
+    }
+
+    fn downloaded(dir: &Path) -> Vec<String> {
+        downloaded_under(
+            dir,
+            &["data", "futures", "um", "daily", "klines", "BTCUSDT", "1d"],
+        )
     }
 
     // — tracker —
@@ -782,6 +823,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(downloaded(dir.path()), vec!["BTCUSDT-1d-2020-01-01.zip"]);
+    }
+
+    #[tokio::test]
+    async fn run_downloads_a_complete_month_once() {
+        // Regression: `run_one` normalizes the monthly end for its skip check,
+        // and `Period::dates` normalizes again. Passing the already-normalized
+        // date as the end dropped the only complete month (start == end).
+        let (endpoints, server) = mock_exchange().await;
+        mock_fapi(
+            &server,
+            "BTCUSDT",
+            ResponseTemplate::new(200).set_body_string(KLINE),
+        )
+        .await;
+        let prefix = "data/futures/um/monthly/fundingRate/BTCUSDT/";
+        let listing = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>data.binance.vision</Name>
+<Prefix>{prefix}</Prefix>
+<MaxKeys>1</MaxKeys>
+<IsTruncated>true</IsTruncated>
+<Contents><Key>{prefix}BTCUSDT-fundingRate-2020-01.zip</Key></Contents>
+</ListBucketResult>"#
+        );
+        Mock::given(method("GET"))
+            .and(query_param("prefix", prefix))
+            .respond_with(ResponseTemplate::new(200).set_body_string(listing))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/data/futures/um/monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2020-01.zip",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(ZIP))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = write_config(
+            dir.path(),
+            &format!(
+                "market = \"futures/um\"\nsymbol = [\"BTCUSDT\"]\n\
+                 start = \"2020-01-01\"\nend = \"2020-01-31\"\n\
+                 output_dir = \"{}\"\n\n\
+                 [[dataset]]\ntype = \"fundingRate\"\nperiods = [\"monthly\"]\n",
+                dir.path().join("out").display()
+            ),
+        );
+        run_with_endpoints(&cfg, endpoints, CancelToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            downloaded_under(
+                dir.path(),
+                &["data", "futures", "um", "monthly", "fundingRate", "BTCUSDT"]
+            ),
+            vec!["BTCUSDT-fundingRate-2020-01.zip"]
+        );
     }
 
     #[tokio::test]
@@ -989,27 +1089,29 @@ mod tests {
         let start = chrono::NaiveDate::from_ymd_opt(2019, 1, 1).unwrap();
         let cfg = AppConfig {
             symbol: symbols.clone(),
-            timeframe: vec![crate::config::Timeframe::D1],
+            market: Market::Um,
+            dataset: vec![klines_dataset(&[Interval::D1])],
             start: Some(start),
             end: None,
             output_dir: dir.path().to_path_buf(),
             concurrency: 1,
             not_found_pct_threshold: None,
         };
+        let jobs = cfg.jobs();
 
         let out = resolve_start_dates(
             &client,
             &cache,
             &cfg,
             &symbols,
-            &cfg.timeframe,
+            &jobs,
             &endpoints,
             &CancelToken::new(),
         )
         .await;
 
         assert_eq!(
-            out.get("OKUSDT", crate::config::Timeframe::D1),
+            out.get("OKUSDT", d1_job()),
             Some(SymbolStart::Resolved(
                 chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap()
             ))
@@ -1017,12 +1119,12 @@ mod tests {
         // The degraded symbol still gets a date, from the config — and the
         // type says so.
         assert_eq!(
-            out.get("DEADUSDT", crate::config::Timeframe::D1),
+            out.get("DEADUSDT", d1_job()),
             Some(SymbolStart::Degraded(start))
         );
         assert_eq!(
             out.degraded(),
-            vec![("DEADUSDT".to_owned(), crate::config::Timeframe::D1, start)]
+            vec![("DEADUSDT".to_owned(), d1_job(), start)]
         );
         // The unknown symbol is fatal and absent from the map.
         assert_eq!(out.failed, vec!["GONEUSDT".to_owned()]);
@@ -1048,20 +1150,22 @@ mod tests {
         let symbols = vec!["NOPEUSDT".to_owned()];
         let cfg = AppConfig {
             symbol: symbols.clone(),
-            timeframe: vec![crate::config::Timeframe::D1],
+            market: Market::Um,
+            dataset: vec![klines_dataset(&[Interval::D1])],
             start: None,
             end: None,
             output_dir: dir.path().to_path_buf(),
             concurrency: 1,
             not_found_pct_threshold: None,
         };
+        let jobs = cfg.jobs();
 
         let out = resolve_start_dates(
             &client,
             &cache,
             &cfg,
             &symbols,
-            &cfg.timeframe,
+            &jobs,
             &endpoints,
             &CancelToken::new(),
         )
@@ -1091,13 +1195,15 @@ mod tests {
         let symbols = vec!["AUSDT".to_owned(), "BUSDT".to_owned()];
         let cfg = AppConfig {
             symbol: symbols.clone(),
-            timeframe: vec![crate::config::Timeframe::D1],
+            market: Market::Um,
+            dataset: vec![klines_dataset(&[Interval::D1])],
             start: None,
             end: None,
             output_dir: dir.path().to_path_buf(),
             concurrency: 1,
             not_found_pct_threshold: None,
         };
+        let jobs = cfg.jobs();
 
         let cancel = CancelToken::new();
         let signaller = cancel.clone();
@@ -1108,15 +1214,7 @@ mod tests {
 
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            resolve_start_dates(
-                &client,
-                &cache,
-                &cfg,
-                &symbols,
-                &cfg.timeframe,
-                &endpoints,
-                &cancel,
-            ),
+            resolve_start_dates(&client, &cache, &cfg, &symbols, &jobs, &endpoints, &cancel),
         )
         .await
         .expect("start-date resolution must honour the cancel token");
@@ -1146,26 +1244,28 @@ mod tests {
         let symbols = vec!["BTCUSDT".to_owned()];
         let cfg = AppConfig {
             symbol: symbols.clone(),
-            timeframe: vec![crate::config::Timeframe::D1],
+            market: Market::Um,
+            dataset: vec![klines_dataset(&[Interval::D1])],
             start: None,
             end: None,
             output_dir: dir.path().to_path_buf(),
             concurrency: 1,
             not_found_pct_threshold: None,
         };
+        let jobs = cfg.jobs();
 
         let out = resolve_start_dates(
             &client,
             &cache,
             &cfg,
             &symbols,
-            &cfg.timeframe,
+            &jobs,
             &endpoints,
             &CancelToken::new(),
         )
         .await;
         assert_eq!(
-            out.get("BTCUSDT", crate::config::Timeframe::D1),
+            out.get("BTCUSDT", d1_job()),
             Some(SymbolStart::Resolved(
                 chrono::NaiveDate::from_ymd_opt(2020, 6, 1).unwrap()
             ))
@@ -1191,26 +1291,28 @@ mod tests {
         let symbols = vec!["BTCUSDT".to_owned()];
         let cfg = AppConfig {
             symbol: symbols.clone(),
-            timeframe: vec![crate::config::Timeframe::D1],
+            market: Market::Um,
+            dataset: vec![klines_dataset(&[Interval::D1])],
             start: None,
             end: None,
             output_dir: dir.path().to_path_buf(),
             concurrency: 1,
             not_found_pct_threshold: None,
         };
+        let jobs = cfg.jobs();
 
         let out = resolve_start_dates(
             &client,
             &cache,
             &cfg,
             &symbols,
-            &cfg.timeframe,
+            &jobs,
             &endpoints,
             &CancelToken::new(),
         )
         .await;
         assert_eq!(
-            out.get("BTCUSDT", crate::config::Timeframe::D1),
+            out.get("BTCUSDT", d1_job()),
             Some(SymbolStart::Resolved(
                 chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap()
             ))
@@ -1219,7 +1321,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_run_schedules_no_further_pair() {
-        // The cancel check lives in the timeframe loop, not only in the symbol
+        // The cancel check lives in the job loop, not only in the symbol
         // loop: a Ctrl-C during the first pair must stop the *next* pair of
         // the same symbol, which may be another thousands of files.
         let (endpoints, server) = mock_exchange().await;
@@ -1247,8 +1349,10 @@ mod tests {
         let cfg = write_config(
             dir.path(),
             &format!(
-                "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1d\", \"1h\"]\nstart = \"2020-01-01\"\n\
-                 end = \"2020-01-01\"\noutput_dir = \"{}\"\n",
+                "market = \"futures/um\"\nsymbol = [\"BTCUSDT\"]\nstart = \"2020-01-01\"\n\
+                 end = \"2020-01-01\"\noutput_dir = \"{}\"\n\n\
+                 [[dataset]]\ntype = \"klines\"\nperiods = [\"daily\"]\n\
+                 intervals = [\"1d\", \"1h\"]\n",
                 dir.path().join("out").display()
             ),
         );
@@ -1261,7 +1365,7 @@ mod tests {
         });
 
         run_with_endpoints(&cfg, endpoints, cancel).await.unwrap();
-        // Only the first pair was ever scheduled: the second timeframe was
+        // Only the first pair was ever scheduled: the second job was
         // never requested.
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
@@ -1295,8 +1399,9 @@ mod tests {
         let cfg = write_config(
             dir.path(),
             &format!(
-                "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1d\"]\nstart = \"2020-01-01\"\n\
-                 end = \"2020-01-02\"\nnot_found_pct_threshold = 50.0\noutput_dir = \"{}\"\n",
+                "market = \"futures/um\"\nsymbol = [\"BTCUSDT\"]\nstart = \"2020-01-01\"\n\
+                 end = \"2020-01-02\"\nnot_found_pct_threshold = 50.0\noutput_dir = \"{}\"\n\n\
+                 [[dataset]]\ntype = \"klines\"\nperiods = [\"daily\"]\nintervals = [\"1d\"]\n",
                 dir.path().join("out").display()
             ),
         );
@@ -1357,9 +1462,10 @@ mod tests {
         let cfg = write_config(
             dir.path(),
             &format!(
-                "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1d\"]\nstart = \"2020-01-01\"\n\
+                "market = \"futures/um\"\nsymbol = [\"BTCUSDT\"]\nstart = \"2020-01-01\"\n\
                  end = \"2020-01-03\"\nconcurrency = 1\nnot_found_pct_threshold = 10.0\n\
-                 output_dir = \"{}\"\n",
+                 output_dir = \"{}\"\n\n\
+                 [[dataset]]\ntype = \"klines\"\nperiods = [\"daily\"]\nintervals = [\"1d\"]\n",
                 dir.path().join("out").display()
             ),
         );
@@ -1414,8 +1520,9 @@ mod tests {
         let cfg = write_config(
             dir.path(),
             &format!(
-                "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1d\"]\nstart = \"2020-01-01\"\n\
-                 end = \"2020-01-02\"\nnot_found_pct_threshold = 75.0\noutput_dir = \"{}\"\n",
+                "market = \"futures/um\"\nsymbol = [\"BTCUSDT\"]\nstart = \"2020-01-01\"\n\
+                 end = \"2020-01-02\"\nnot_found_pct_threshold = 75.0\noutput_dir = \"{}\"\n\n\
+                 [[dataset]]\ntype = \"klines\"\nperiods = [\"daily\"]\nintervals = [\"1d\"]\n",
                 dir.path().join("out").display()
             ),
         );
@@ -1441,8 +1548,9 @@ mod tests {
         let cfg = write_config(
             dir.path(),
             &format!(
-                "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1d\"]\nstart = \"2099-01-01\"\n\
-                 output_dir = \"{}\"\n",
+                "market = \"futures/um\"\nsymbol = [\"BTCUSDT\"]\nstart = \"2099-01-01\"\n\
+                 output_dir = \"{}\"\n\n\
+                 [[dataset]]\ntype = \"klines\"\nperiods = [\"daily\"]\nintervals = [\"1d\"]\n",
                 dir.path().join("out").display()
             ),
         );
@@ -1489,8 +1597,10 @@ mod tests {
         let cfg = write_config(
             dir.path(),
             &format!(
-                "symbol = [\"BTCUSDT\"]\ntimeframe = [\"1m\", \"3m\", \"5m\", \"15m\", \"30m\"]\n\
-                 start = \"2020-01-01\"\nend = \"2020-01-01\"\noutput_dir = \"{}\"\n",
+                "market = \"futures/um\"\nsymbol = [\"BTCUSDT\"]\n\
+                 start = \"2020-01-01\"\nend = \"2020-01-01\"\noutput_dir = \"{}\"\n\n\
+                 [[dataset]]\ntype = \"klines\"\nperiods = [\"daily\"]\n\
+                 intervals = [\"1m\", \"3m\", \"5m\", \"15m\", \"30m\"]\n",
                 dir.path().join("out").display()
             ),
         );

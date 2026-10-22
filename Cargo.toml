@@ -16,7 +16,7 @@ edition = "2024"
 # 依赖树自身也有下限(锁定图中 `redb 4.4.0` 要求 rustc >= 1.90), 但那不是本项目
 # 对使用者的承诺, 而是用最新 stable 时自然满足的事实。
 authors = ["NautilusTrader Developer"]
-description = "Download historical USDⓈ-M futures kline archives from the Binance public data archive."
+description = "Download spot and futures datasets from the Binance public data archive."
 license = "MIT"
 
 [lib]
