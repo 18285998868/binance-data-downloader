@@ -40,8 +40,8 @@ RUST_LOG=info ./target/release/binance-data-downloader -c config.toml
 RUST_LOG=info ./target/release/binance-data-downloader -c config.toml --verify
 
 # 独立校验已有输出目录中的全部 .zip（不下载、不改文件）
-./target/release/binance-data-verify --dir /data/binance
-./target/release/binance-data-verify --dir /data/binance --jobs 8
+./target/release/binance-data-verify --dir path/to/data/binance
+./target/release/binance-data-verify --dir path/to/data/binance --jobs 8
 ```
 
 - 已存在的 `.zip` 按路径跳过，重复执行安全，可用于增量补全。
@@ -54,15 +54,15 @@ RUST_LOG=info ./target/release/binance-data-downloader -c config.toml --verify
 
 ```toml
 market = "futures/um"
-output_dir = "/data/binance"
+output_dir = "path/to/data/binance"
 ```
 
 ```text
-/data/binance/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-02.zip
-/data/binance/data/futures/um/monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2024-01.zip
-/data/binance/data/spot/daily/aggTrades/BTCUSDT/BTCUSDT-aggTrades-2024-01-02.zip
-/data/binance/data/futures/cm/daily/liquidationSnapshot/BTCUSD_PERP/BTCUSD_PERP-liquidationSnapshot-2024-01-02.zip
-/data/binance/data/futures/cm/daily/indexPriceKlines/BTCUSD/1m/BTCUSD-1m-2020-06-30.zip
+path/to/data/binance/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-02.zip
+path/to/data/binance/data/futures/um/monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2024-01.zip
+path/to/data/binance/data/spot/daily/aggTrades/BTCUSDT/BTCUSDT-aggTrades-2024-01-02.zip
+path/to/data/binance/data/futures/cm/daily/liquidationSnapshot/BTCUSD_PERP/BTCUSD_PERP-liquidationSnapshot-2024-01-02.zip
+path/to/data/binance/data/futures/cm/daily/indexPriceKlines/BTCUSD/1m/BTCUSD-1m-2020-06-30.zip
 ```
 
 规则汇总：
@@ -80,8 +80,8 @@ output_dir = "/data/binance"
   `data/futures/um/...`。迁移示例：
 
 ```bash
-mkdir -p /data/binance/data/futures
-mv /data/binance/data/um /data/binance/data/futures/um
+mkdir -p path/to/data/binance/data/futures
+mv path/to/data/binance/data/um path/to/data/binance/data/futures/um
 # cm 同理
 ```
 
@@ -106,7 +106,7 @@ market = "futures/um" # 必填：spot | futures/um | futures/cm（也接受 um /
 symbol = ["BTCUSDT"]  # 必填：非空，字符集 [A-Za-z0-9_]；运行时转大写、排序、去重
 # start = "2020-01-01" # 可选：缺省=每个 job 自己的归档首日
 # end   = "2025-01-01" # 可选：缺省昨天；未来值截到昨天
-# output_dir = "/data/binance" # 可选：data/ 的父目录；缺省 "."
+# output_dir = "path/to/data/binance" # 可选：data/ 的父目录；缺省 "."
 # concurrency = 64 # 可选：0 < c ≤ 1024；单个 pair 内最大并发
 # not_found_pct_threshold = 50.0 # 可选：0 < t ≤ 100；404 占比达到 t 判失败
 

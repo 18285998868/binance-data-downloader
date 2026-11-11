@@ -4,7 +4,7 @@ symbol = ["BTCUSDT"] # 下载的交易对列表, 必填
 
 # start = "2020-01-01" # 开始时间, 可选, 默认值: 无, 可选参数: YYYY-MM-DD
 # end = "2025-01-01" # 结束时间, 可选, 默认值: 昨天, 可选参数: YYYY-MM-DD
-output_dir = "/data/nutilustrader/data/binance" # data/ 的父目录
+output_dir = "/data/data/binance" # data/ 的父目录
 concurrency = 64 # 每个 (symbol × job) 配对内的最大并发下载数, 可选, 默认值: 64
 
 [[dataset]]

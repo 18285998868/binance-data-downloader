@@ -4,10 +4,10 @@
 #   output_dir 是网页 data/ 的父目录，程序严格拼接：
 #   {output_dir}/data/{spot|futures/um|futures/cm}/{daily|monthly}/{type}/...
 #
-#   正确：output_dir = "/data/binance"
-#         → /data/binance/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-02.zip
-#   错误：output_dir = "/data/binance/data/futures/um"
-#         → /data/binance/data/futures/um/data/futures/um/...
+#   正确：output_dir = "path/to/data/binance"
+#         → path/to/data/binance/data/futures/um/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2024-01-02.zip
+#   错误：output_dir = "path/to/data/binance/data/futures/um"
+#         → path/to/data/binance/data/futures/um/data/futures/um/...
 #
 # 旧版本路径 data/um/... 不再兼容；请先把旧数据移动到 data/futures/um/...
 
@@ -16,7 +16,7 @@ symbol = ["BTCUSDT"]  # 必填: 非空, 字符集 [A-Za-z0-9_]；运行时转大
 
 # start = "2020-01-01"        # 可选: 缺省=每个 job 自己的归档首日
 # end = "2025-01-01"          # 可选: 缺省昨天；未来值截到昨天
-# output_dir = "/data/binance" # 可选: data/ 的父目录；缺省 "."
+# output_dir = "path/to/data/binance" # 可选: data/ 的父目录；缺省 "."
 # concurrency = 64            # 可选: 0 < c ≤ 1024；单个 pair 内最大并发
 # not_found_pct_threshold = 50.0 # 可选: 0 < t ≤ 100；404 占比达到 t 判失败
 
@@ -80,7 +80,7 @@ intervals = ["1m", "1d"]
 # symbol = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "LINKUSDT"]
 # start = "2020-01-01"
 # end = "2026-09-30"
-# output_dir = "/data/nutilustrader/data"
+# output_dir = "path/to/data/binance"
 #
 # 说明：
 # - 程序按 symbol × job 串行处理，job 内并发下载；
