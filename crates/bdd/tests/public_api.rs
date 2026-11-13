@@ -1,13 +1,14 @@
-//! Integration tests over the crate's public surface: `run`, `Cli`, `AppError`.
+//! Integration tests over the crate's public surface: `run`, `verify_zip` and
+//! `AppError`.
 //!
 //! These exercise the binary's entry point end to end as far as the public API
 //! allows — without touching the network, since `run` resolves its own base
 //! URLs. Downloading behaviour itself is covered by the unit tests in
-//! `src/app/download/stream.rs`, which drive a `wiremock` server.
+//! `src/download/fetch/stream.rs`, which drive a `wiremock` server.
 
 use std::path::Path;
 
-use bdd::{AppError, Cli, run, verify_zip};
+use bdd::{AppError, run, verify_zip};
 
 #[tokio::test]
 async fn run_reports_a_missing_config_file() {
@@ -62,14 +63,6 @@ async fn run_reports_an_unknown_config_key() {
     .unwrap();
 
     assert!(run(&path).await.is_err());
-}
-
-#[test]
-fn cli_requires_a_config_flag() {
-    use clap::Parser;
-    assert!(Cli::try_parse_from(["bdd"]).is_err());
-    let cli = Cli::try_parse_from(["bdd", "-c", "config.toml"]).unwrap();
-    assert_eq!(cli.config, Path::new("config.toml").to_path_buf());
 }
 
 #[test]

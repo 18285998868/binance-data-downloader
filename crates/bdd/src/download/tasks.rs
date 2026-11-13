@@ -1,10 +1,11 @@
 //! Turning a symbol/job/date range into [`DownloadTask`]s, minus what is
 //! already on disk.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use super::urls::build_urls;
-use crate::config::DownloadTask;
+mod urls;
+
+use self::urls::build_urls;
 use crate::dataset::{DownloadJob, Market};
 use crate::scan::LocalFileSet;
 
@@ -12,6 +13,19 @@ use crate::scan::LocalFileSet;
 ///
 /// `local` holds 128-bit [`crate::scan::rel_path_hash`]es of the files found by
 /// [`crate::scan::scan_local_files`].
+/// A download task: source URL, destination path and identifying metadata.
+#[derive(Debug, Clone)]
+pub(crate) struct DownloadTask {
+    /// Source URL.
+    pub url: String,
+    /// Destination path on disk.
+    pub dest: PathBuf,
+    /// Trading pair symbol.
+    pub pair: String,
+    /// Dataset/period/interval this file belongs to.
+    pub job: DownloadJob,
+}
+
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_download_tasks(
@@ -53,8 +67,8 @@ pub(crate) fn build_download_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::urls::ARCHIVE_BASE;
     use crate::dataset::{DatasetKind, Interval, Period};
+    use crate::endpoints::ARCHIVE_BASE;
 
     fn date(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
         chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()

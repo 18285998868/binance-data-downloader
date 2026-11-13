@@ -28,10 +28,6 @@ use crate::backoff::{
 use crate::cache::Cache;
 use crate::dataset::{DownloadJob, Market, Period};
 
-/// The bucket's public endpoint. Kept as a parameter elsewhere so tests can
-/// point the whole pipeline at a mock server.
-pub(crate) const S3_BASE: &str = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision";
-
 /// Cache domain of the archive-derived start dates.
 const CACHE_DOMAIN: &str = "archive_start";
 
@@ -278,6 +274,7 @@ fn parse_cached_date(raw: &[u8]) -> Option<chrono::NaiveDate> {
 mod tests {
     use super::*;
     use crate::dataset::{DatasetKind, Interval};
+    use crate::endpoints::S3_BASE;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

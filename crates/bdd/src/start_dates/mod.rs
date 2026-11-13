@@ -24,15 +24,23 @@
 
 use std::collections::HashMap;
 
+mod archive;
+mod market;
+mod merge;
+
+pub(crate) use merge::resolve_start;
+use merge::{resolve_job_start, start_fallback};
+
 use futures::StreamExt;
 use futures::stream::iter as stream_iter;
 
 use crate::AppError;
-use crate::app::Endpoints;
 use crate::cache::Cache;
 use crate::cancel::CancelToken;
 use crate::config::AppConfig;
-use crate::dataset::{DatasetKind, DownloadJob};
+use crate::dataset::DownloadJob;
+use crate::endpoints::Endpoints;
+use crate::prepare::PreparedRun;
 
 /// The start date of one (symbol, job).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,14 +141,14 @@ pub(crate) async fn resolve_start_dates(
             // resolving per interval would issue N×11 extra requests for
             // identical answers.
             let (api, archive) = tokio::join!(
-                crate::start_date::get_first_kline_date(
+                crate::start_dates::market::get_first_kline_date(
                     &client,
                     cache,
                     market,
                     endpoints.exchange_api(market),
                     &sym,
                 ),
-                crate::archive::archive_dates(
+                crate::start_dates::archive::archive_dates(
                     &client,
                     cache,
                     &endpoints.archive_listing,
@@ -243,45 +251,32 @@ pub(crate) async fn resolve_start_dates(
     out
 }
 
-/// Combine the API listing date and the archive date for one job.
+/// Resolve every start date using the resources prepared for this run.
 ///
-/// For ordinary datasets the API date is a floor: the archive cannot predate
-/// the symbol. `indexPriceKlines` is the exception — it is keyed by the
-/// underlying index, which can exist before the configured contract.
-fn resolve_job_start(
-    job: DownloadJob,
-    api_date: chrono::NaiveDate,
-    archive_date: Option<chrono::NaiveDate>,
-) -> chrono::NaiveDate {
-    match archive_date {
-        Some(date) if job.kind == DatasetKind::IndexPriceKlines => date,
-        Some(date) => api_date.max(date),
-        None => api_date,
-    }
-}
+/// Logs the aggregate outcome once; per-pair details stay in
+/// [`StartDateResolution`].
+pub(crate) async fn resolve(prepared: &PreparedRun, cfg: &AppConfig) -> StartDateResolution {
+    let resolution = resolve_start_dates(
+        &prepared.client,
+        &prepared.cache,
+        cfg,
+        &prepared.symbols,
+        &prepared.jobs,
+        &prepared.endpoints,
+        &prepared.cancel,
+    )
+    .await;
 
-/// Pick the first day to download: the later of `config.start` and the
-/// symbol's own start date, so dates before the listing are never requested.
-pub(crate) fn resolve_start(
-    start: Option<chrono::NaiveDate>,
-    symbol_start: chrono::NaiveDate,
-) -> chrono::NaiveDate {
-    start.map_or(symbol_start, |configured| configured.max(symbol_start))
-}
-
-/// Decide whether a failed start-date fetch may degrade to `cfg.start`.
-///
-/// With an explicit `config.start`, a transient failure is recoverable: the
-/// run proceeds from that date. An unknown-symbol error stays fatal, so typos
-/// cannot masquerade as success.
-pub(crate) fn start_fallback(
-    err: &AppError,
-    cfg_start: Option<chrono::NaiveDate>,
-) -> Option<chrono::NaiveDate> {
-    match (cfg_start, err) {
-        (Some(start), e) if !matches!(e, AppError::UnknownSymbol { .. }) => Some(start),
-        _ => None,
-    }
+    let degraded = resolution.degraded().len();
+    let resolved: usize = resolution.dates.values().map(HashMap::len).sum();
+    tracing::info!(
+        resolved = resolved.saturating_sub(degraded),
+        failed = resolution.failed.len(),
+        degraded,
+        total = prepared.symbols.len() * prepared.jobs.len(),
+        "start-dates resolved",
+    );
+    resolution
 }
 
 #[cfg(test)]
@@ -303,14 +298,6 @@ mod tests {
         DownloadJob {
             kind: DatasetKind::Klines,
             interval: Some(interval),
-            period: Period::Daily,
-        }
-    }
-
-    fn index_job() -> DownloadJob {
-        DownloadJob {
-            kind: DatasetKind::IndexPriceKlines,
-            interval: Some(Interval::M1),
             period: Period::Daily,
         }
     }
@@ -532,88 +519,8 @@ mod tests {
     }
 
     #[test]
-    fn index_jobs_take_the_earlier_archive_date() {
-        // BTCUSD_PERP was listed 2020-08-11, but the BTCUSD index archive
-        // starts 2020-06-30. Clamping to the contract's API date would silently
-        // drop the first six weeks of index history.
-        assert_eq!(
-            resolve_job_start(index_job(), date(2020, 8, 11), Some(date(2020, 6, 30))),
-            date(2020, 6, 30)
-        );
-    }
-
-    #[test]
-    fn ordinary_jobs_clamp_the_archive_to_the_api_date() {
-        assert_eq!(
-            resolve_job_start(
-                klines_job(Interval::D1),
-                date(2020, 8, 11),
-                Some(date(2020, 6, 30))
-            ),
-            date(2020, 8, 11)
-        );
-    }
-
-    #[test]
-    fn a_missing_archive_date_uses_the_api_date() {
-        assert_eq!(
-            resolve_job_start(index_job(), date(2020, 8, 11), None),
-            date(2020, 8, 11)
-        );
-    }
-
-    #[test]
-    fn resolve_start_date_prefers_cfg() {
-        let sym = date(2023, 1, 1);
-        let cfg = date(2024, 1, 1);
-        assert_eq!(resolve_start(Some(cfg), sym), cfg);
-    }
-
-    #[test]
-    fn resolve_start_date_prefers_sym_when_later() {
-        let sym = date(2025, 1, 1);
-        let cfg = Some(date(2024, 1, 1));
-        assert_eq!(resolve_start(cfg, sym), sym);
-    }
-
-    #[test]
-    fn resolve_start_date_no_cfg() {
-        let sym = date(2023, 6, 15);
-        let cfg: Option<chrono::NaiveDate> = None;
-        assert_eq!(resolve_start(cfg, sym), sym);
-    }
-
-    #[test]
-    fn start_fallback_used_when_cfg_start_is_set() {
-        let start = date(2024, 1, 1);
-        let err = AppError::Api {
-            status: None,
-            message: "network down".into(),
-        };
-        assert_eq!(start_fallback(&err, Some(start)), Some(start));
-    }
-
-    #[test]
-    fn start_fallback_rejected_for_unknown_symbol() {
-        let start = date(2024, 1, 1);
-        let err = AppError::UnknownSymbol {
-            symbol: "NOPEUSDT".into(),
-        };
-        assert_eq!(start_fallback(&err, Some(start)), None);
-    }
-
-    #[test]
-    fn start_fallback_needs_cfg_start() {
-        let err = AppError::Api {
-            status: None,
-            message: "network down".into(),
-        };
-        assert_eq!(start_fallback(&err, None), None);
-    }
-
-    #[test]
     fn symbol_start_exposes_its_date_whatever_the_outcome() {
-        let date = date(2024, 1, 1);
+        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         assert_eq!(SymbolStart::Resolved(date).date(), date);
         assert_eq!(SymbolStart::Degraded(date).date(), date);
     }

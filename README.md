@@ -211,41 +211,58 @@ https://s3-ap-northeast-1.amazonaws.com/data.binance.vision?delimiter=/&max-keys
 ## 架构
 
 ```text
-main.rs          入口：tracing、-c/--config/--verify、调用 bdd::run_with_options()
-bin/verify.rs    独立校验器 binance-data-verify
-lib.rs           公开导出 run / RunOptions / Cli / verify_zip / AppError / FailureReport
-cli.rs           clap 参数
-dataset.rs       Market / Period / Interval / DatasetKind / DownloadJob（路径与文件命名）
-config.rs        TOML 解析、校验、jobs() 展开
-app/
-  mod.rs         流水线编排（market、job 循环）
-  start_dates.rs 起始日解析与降级
-  urls.rs        URL / 相对路径生成（迭代器）
-  tasks.rs       任务构建（剔除本地已有）
-  download/      有界并发、重试、原子落盘、可选 zip 校验
-archive.rs       S3 清单解析（按 job）
-start_date.rs    市场 klines API 首日
-scan.rs          本地文件扫描与 tmp 清理
-cache.rs         redb KV 缓存
-backoff.rs       重试 / Retry-After / 120s 窗口
-limits.rs        RLIMIT_NOFILE → 实际并发
-lock.rs          输出目录单实例锁
-verify.rs        zip 中央目录校验
-tests/public_api.rs 公开接口集成测试
+crates/bdd/src/         核心库 bdd
+  lib.rs                公开导出 run / RunOptions / verify_zip / AppError / FailureReport
+  app.rs                五步流程：config -> prepare -> start_dates -> download -> report
+  config/
+    mod.rs              TOML 加载、jobs() 展开
+    raw.rs              反序列化结构与默认值
+    validate.rs         语义校验
+  prepare/
+    mod.rs              本次运行的资源准备
+    lock.rs             输出目录单实例锁
+    client.rs           HTTP client
+    signal.rs           Ctrl-C 处理
+  start_dates/
+    mod.rs              并发调度、结果与降级
+    market.rs           市场 klines API 首日
+    archive.rs          S3 清单解析（按 job）
+    merge.rs            两个来源合并为每个 job 的起始日
+  download/
+    mod.rs              market/job 循环、404 阈值、熔断
+    pair.rs             单个 symbol/job pair
+    tasks.rs            任务构建（剔除本地已有）
+      urls.rs           URL / 相对路径生成（迭代器）
+    fetch.rs            有界并发调度
+      stream.rs         重试、流式落盘、原子 rename
+      validate.rs       zip magic / Content-Length / 可选 zip 校验
+  report.rs             成功/失败判定与 FailureReport
+  dataset.rs            Market / Period / Interval / DatasetKind / DownloadJob
+  scan.rs               本地文件扫描与 tmp 清理
+  cache.rs              redb KV 缓存
+  backoff.rs            重试 / Retry-After / 120s 窗口
+  limits.rs             RLIMIT_NOFILE → 实际并发
+  endpoints.rs          生产/测试端点
+  verify.rs             zip 中央目录校验
+crates/bdd-cli/src/     CLI 包 bdd-cli
+  main.rs               入口：tracing、-c/--config/--verify
+  cli.rs                clap 参数
+  bin/verify.rs         独立校验器 binance-data-verify
+crates/bdd/tests/public_api.rs  公开接口集成测试
 ```
 
 ## 开发
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
 ```
 
 - 工具链由 `rust-toolchain.toml` 固定为最新 stable；`Cargo.toml` 刻意不声明
   `rust-version`，理由见文件内注释。
-- 内部 API 一律 `pub(crate)`；公开面仅 `run` / `run_with_options` / `RunOptions` /
-  `Cli` / `verify_zip` / `AppError` / `FailureReport`。
-- crate 根文档即本 README（`#![doc = include_str!("../README.md")]`）。
+- 内部 API 一律 `pub(crate)`；`bdd` 的公开面仅 `run` / `run_with_options` /
+  `RunOptions` / `verify_zip` / `AppError` / `FailureReport`。
+- crate 根文档即本 README（`#![doc = include_str!("../../../README.md")]`）。
 - 测试覆盖：11 种数据集能力矩阵、路径/文件名、日/月迭代、配置校验、起始日三态、
   URL/任务生成、缓存、扫描、重试分类、原子落盘、取消与整套编排分支。

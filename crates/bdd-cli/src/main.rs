@@ -7,6 +7,8 @@ use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+mod cli;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing with `RUST_LOG` (falls back to `info`).
@@ -17,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Parse command-line arguments (`--config`/`-c` is required).
-    let cli = bdd::Cli::parse();
+    let cli = cli::Cli::parse();
 
     // Run the download pipeline, annotating any error with pipeline context.
     let options = bdd::RunOptions::new().with_verify(cli.verify);

@@ -1,11 +1,12 @@
 //! Bounded-concurrency fan-out over download tasks, plus aggregate statistics.
 
-pub mod stream;
+mod stream;
+mod validate;
 
 use std::future::Future;
 
+use super::tasks::DownloadTask;
 use crate::AppError;
-use crate::config::DownloadTask;
 use futures::stream::{StreamExt, iter as stream_iter};
 use tracing::Instrument;
 

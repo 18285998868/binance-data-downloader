@@ -2,22 +2,13 @@
 
 use tokio::io::AsyncWriteExt;
 
+use super::validate;
 use crate::backoff::{
     RETRY_WINDOW, RetryError, RetryPolicy, default_retry_policy, is_transient_status,
     parse_retry_after, retry_operation,
 };
 use crate::cancel::CancelToken;
-use crate::config::DownloadTask;
-use crate::verify::verify_zip_archive;
-
-/// Bytes every non-empty zip archive begins with.
-const ZIP_MAGIC: &[u8; 4] = b"PK\x03\x04";
-
-/// Upper bound on chunks read while hunting for the zip magic.
-///
-/// Guards against a server that dribbles empty chunks: without it a stream of
-/// zero-length frames would spin forever inside the retry window.
-const MAX_MAGIC_CHUNKS: u32 = 8;
+use crate::download::tasks::DownloadTask;
 
 /// Download a zip file with retry, streaming directly to disk.
 ///
@@ -186,54 +177,16 @@ async fn download_to_file_with_backoff(
             // Fetch the leading bytes before touching the filesystem: the body
             // must start with the zip magic, which rejects HTML error pages
             // served with a 200 status without writing anything to disk.
-            //
-            // The magic is accumulated across chunks rather than read from the
-            // first one: with chunked transfer encoding the four magic bytes
-            // can straddle a frame boundary, and mistaking that for "not a zip"
-            // would burn the entire retry window on a perfectly good file.
             let expected_len = resp.content_length();
-            let mut head = Vec::with_capacity(ZIP_MAGIC.len());
-            let mut chunks_read = 0u32;
-            while head.len() < ZIP_MAGIC.len() {
-                chunks_read += 1;
-                if chunks_read > MAX_MAGIC_CHUNKS {
+            let head = match validate::read_zip_head(&mut resp, &u).await {
+                Ok(head) => head,
+                Err(e) => {
                     return Err(RetryError::Transient {
-                        err: crate::AppError::DownloadFailed {
-                            url: u,
-                            reason: "response is not a zip archive".into(),
-                        },
+                        err: e,
                         retry_after: None,
                     });
                 }
-                let chunk = match resp.chunk().await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => {
-                        return Err(RetryError::Transient {
-                            err: crate::AppError::DownloadFailed {
-                                url: u,
-                                reason: "empty response body".into(),
-                            },
-                            retry_after: None,
-                        });
-                    }
-                    Err(e) => {
-                        return Err(RetryError::Transient {
-                            err: crate::AppError::from(e),
-                            retry_after: None,
-                        });
-                    }
-                };
-                head.extend_from_slice(&chunk);
-            }
-            if &head[..ZIP_MAGIC.len()] != ZIP_MAGIC {
-                return Err(RetryError::Transient {
-                    err: crate::AppError::DownloadFailed {
-                        url: u,
-                        reason: "response is not a zip archive".into(),
-                    },
-                    retry_after: None,
-                });
-            }
+            };
 
             if let Some(p) = dest.parent() {
                 tokio::fs::create_dir_all(p)
@@ -272,14 +225,9 @@ async fn download_to_file_with_backoff(
             }
 
             // The body must match Content-Length when the server provided it.
-            if let Some(expected) = expected_len
-                && written != expected
-            {
+            if let Err(e) = validate::check_content_length(written, expected_len, &u) {
                 return Err(RetryError::Transient {
-                    err: crate::AppError::DownloadFailed {
-                        url: u,
-                        reason: format!("incomplete download: {written}/{expected} bytes"),
-                    },
+                    err: e,
                     retry_after: None,
                 });
             }
@@ -300,12 +248,9 @@ async fn download_to_file_with_backoff(
 
             // Optional structural check of the finished file. A corrupt
             // archive is worth another attempt, so it is transient.
-            if verify && let Err(e) = verify_zip_archive(&tmp).await {
+            if let Err(e) = validate::check_archive(&tmp, &u, verify).await {
                 return Err(RetryError::Transient {
-                    err: crate::AppError::DownloadFailed {
-                        url: u,
-                        reason: format!("zip verification failed: {e}"),
-                    },
+                    err: e,
                     retry_after: None,
                 });
             }
@@ -1044,11 +989,5 @@ mod tests {
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
                 .await;
         assert!(matches!(result, Err(AppError::DownloadFailed { .. })));
-    }
-
-    #[test]
-    fn zip_magic_constant_is_the_local_file_signature() {
-        assert_eq!(ZIP_MAGIC, b"PK\x03\x04");
-        assert_eq!(ZIP_MAGIC.len(), 4);
     }
 }

@@ -8,34 +8,37 @@
 //! The crate documentation is the project README, so that the published docs
 //! and the repository README can never drift apart.
 //!
-//! Module layout: `app/` holds the pipeline (`urls`, `tasks`,
-//! `download/`, `start_dates`); supporting modules are `archive`, `backoff`,
-//! `cache`, `cancel`, `cli`, `config`, `dataset`, `error`, `limits`, `lock`,
-//! `start_date`, `scan` and `verify`. The `binance-data-verify` binary lives
-//! in `src/bin/` and shares [`verify_zip`] with the download pipeline.
+//! Module layout: `app` is the five-step pipeline — `config`, `prepare`,
+//! `start_dates`, `download` and `report`; supporting modules are `backoff`,
+//! `cache`, `cancel`, `dataset`, `endpoints`, `error`, `limits`, `scan` and
+//! `verify`. The `binance-data-verify` binary lives in the `bdd-cli` package
+//! and shares [`verify_zip`] with the download pipeline.
 //!
 //! The modules are an implementation detail; the public surface is [`run`],
-//! [`run_with_options`], [`RunOptions`], [`Cli`], [`verify_zip`], [`AppError`]
-//! and [`FailureReport`].
+//! [`run_with_options`], [`RunOptions`], [`verify_zip`], [`AppError`] and
+//! [`FailureReport`].
 
-#![doc = include_str!("../README.md")]
+#![doc = include_str!("../../../README.md")]
 
 mod app;
-mod archive;
 mod backoff;
 mod cache;
 mod cancel;
-mod cli;
 mod config;
 mod dataset;
+mod download;
+mod endpoints;
 mod error;
 mod limits;
-mod lock;
+mod prepare;
+mod report;
 mod scan;
-mod start_date;
+mod start_dates;
 mod verify;
 
+#[cfg(test)]
+mod pipeline_tests;
+
 pub use app::{RunOptions, run, run_with_options};
-pub use cli::Cli;
 pub use error::{AppError, FailureReport};
 pub use verify::verify_zip;

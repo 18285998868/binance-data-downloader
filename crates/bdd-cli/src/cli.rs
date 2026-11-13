@@ -5,20 +5,10 @@ use std::path::PathBuf;
 
 /// Command-line arguments accepted by the `binance-data-downloader` binary.
 ///
-/// The example below is a doctest; `long_about` keeps it out of `--help`,
-/// which would otherwise render the raw doctest source.
-///
 /// # Examples
 ///
-/// ```
-/// use clap::Parser;
-/// use bdd::Cli;
-///
-/// # fn main() -> Result<(), clap::Error> {
-/// let cli = Cli::try_parse_from(["binance-data-downloader", "-c", "config.toml"])?;
-/// assert_eq!(cli.config, std::path::Path::new("config.toml"));
-/// # Ok(())
-/// # }
+/// ```text
+/// binance-data-downloader -c config.toml
 /// ```
 #[derive(Debug, Clone, Parser)]
 #[command(

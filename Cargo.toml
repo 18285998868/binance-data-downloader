@@ -1,7 +1,8 @@
 [workspace]
+resolver = "3"
+members = ["crates/*"]
 
-[package]
-name = "binance-data-downloader"
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 # **刻意不声明 `rust-version`**: 本项目目标是"永远用最新 stable"(见
@@ -16,21 +17,9 @@ edition = "2024"
 # 依赖树自身也有下限(锁定图中 `redb 4.4.0` 要求 rustc >= 1.90), 但那不是本项目
 # 对使用者的承诺, 而是用最新 stable 时自然满足的事实。
 authors = ["NautilusTrader Developer"]
-description = "Download spot and futures datasets from the Binance public data archive."
 license = "MIT"
 
-[lib]
-name = "bdd"
-
-[[bin]]
-name = "binance-data-downloader"
-path = "src/main.rs"
-
-[[bin]]
-name = "binance-data-verify"
-path = "src/bin/verify.rs"
-
-[dependencies]
+[workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "signal"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
@@ -45,7 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "2"
 anyhow = "1"
 # Retry scheduling: backon supplies the exponential schedule and Tokio sleep
-# integration; `src/backoff.rs` adds the `Retry-After` override and deadline.
+# integration; `backoff.rs` adds the `Retry-After` override and deadline.
 backon = { version = "1.6", default-features = false, features = ["std", "tokio-sleep"] }
 # Parallel verification in the independent `binance-data-verify` binary.
 rayon = "1.12"
@@ -67,16 +56,11 @@ rlimit = "0.11"
 # on purpose -- the seeds are fixed, which keeps the hash reproducible.
 ahash = { version = "0.8", default-features = false, features = ["std"] }
 
-[dev-dependencies]
-tempfile = "3"
-wiremock = "0.6"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 correctness = { level = "deny", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }

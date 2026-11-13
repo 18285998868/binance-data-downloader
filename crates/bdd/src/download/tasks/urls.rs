@@ -19,9 +19,6 @@ pub(crate) struct DownloadUrl<'a> {
     pub job: DownloadJob,
 }
 
-/// Public data archive base URL.
-pub(crate) const ARCHIVE_BASE: &str = "https://data.binance.vision";
-
 /// Generate archive download URLs for one symbol/job and date range.
 ///
 /// Returns an **iterator**: a long range (six years of `1m` is 2190 days)
@@ -32,7 +29,7 @@ pub(crate) const ARCHIVE_BASE: &str = "https://data.binance.vision";
 /// months by [`crate::dataset::Period::dates`].
 ///
 /// `archive_base` is a parameter rather than a constant so tests can point the
-/// whole pipeline at a mock server; see [`crate::app::Endpoints`].
+/// whole pipeline at a mock server; see [`crate::endpoints::Endpoints`].
 pub(crate) fn build_urls<'a>(
     archive_base: &'a str,
     market: Market,
@@ -58,6 +55,7 @@ pub(crate) fn build_urls<'a>(
 mod tests {
     use super::*;
     use crate::dataset::{DatasetKind, Interval, Period};
+    use crate::endpoints::ARCHIVE_BASE;
 
     fn date(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
         chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
