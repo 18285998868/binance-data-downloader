@@ -31,7 +31,7 @@ K 线类数据集必须提供 `intervals`，其他数据集禁止提供：
 ## 快速开始
 
 ```bash
-cp config.example.toml config.toml
+cp config/00.example.toml config.toml
 # 按需修改 market / symbol / dataset / output_dir / start / end
 cargo build --release
 RUST_LOG=info ./target/release/binance-data-downloader -c config.toml
@@ -87,7 +87,7 @@ mv path/to/data/binance/data/um path/to/data/binance/data/futures/um
 
 ## 配置
 
-完整示例见 `config.example.toml`。最小配置：
+完整示例见 `config/00.example.toml`。最小配置：
 
 ```toml
 market = "futures/um"
@@ -215,9 +215,10 @@ crates/core/src/       下载引擎（包名 bdd，五步 pipeline 与全部实�
   lib.rs                公开导出 run / RunOptions / verify_zip / AppError / FailureReport
   app.rs                五步流程：config -> prepare -> start_dates -> download -> report
   config/
-    mod.rs              TOML 加载、jobs() 展开
+    mod.rs              TOML 加载、Config 门面
     raw.rs              反序列化结构与默认值
-    validate.rs         语义校验
+    validate.rs         语义校验、symbol/job 派生
+    error.rs            配置错误（路径只渲染一次）
   prepare/
     mod.rs              本次运行的资源准备
     lock.rs             输出目录单实例锁
@@ -228,6 +229,7 @@ crates/core/src/       下载引擎（包名 bdd，五步 pipeline 与全部实�
     market.rs           市场 klines API 首日
     archive.rs          S3 清单解析（按 job）
     merge.rs            两个来源合并为每个 job 的起始日
+    error.rs            起始日错误
   download/
     mod.rs              market/job 循环、404 阈值、熔断
     pair.rs             单个 symbol/job pair
@@ -236,31 +238,42 @@ crates/core/src/       下载引擎（包名 bdd，五步 pipeline 与全部实�
     fetch.rs            有界并发调度
       stream.rs         重试、流式落盘、原子 rename
       validate.rs       zip magic / Content-Length / 可选 zip 校验
+    error.rs            单文件下载错误
   report.rs             成功/失败判定与 FailureReport
   dataset.rs            Market / Period / Interval / DatasetKind / DownloadJob
   scan.rs               本地文件扫描与 tmp 清理
-  cache.rs              redb KV 缓存
-  backoff.rs            重试 / Retry-After / 120s 窗口
+  cache.rs              redb KV 缓存（CacheError）
+  backoff.rs            通用重试 / Retry-After / 120s 窗口
   limits.rs             RLIMIT_NOFILE → 实际并发
   endpoints.rs          生产/测试端点
   verify.rs             zip 中央目录校验
 crates/cli/src/         CLI 包 bdd-cli
   main.rs               入口：tracing、-c/--config/--verify
   cli.rs                clap 参数
-  bin/verify.rs         独立校验器 binance-data-verify
+  bin/verify/
+    main.rs             独立校验器入口：参数、线程数、退出码
+    tree.rs             遍历目录并并发校验 zip
+crates/cli/tests/cli.rs 真实二进制的 CLI 集成测试
 crates/core/tests/public_api.rs  公开接口集成测试
 ```
 
 ## 开发
 
+本地与 CI 使用同一个门禁入口：
+
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
+./scripts/check.sh        # 本地
+./scripts/check.sh --ci   # CI：nextest 使用 ci profile
 ```
+
+门禁依次运行 fmt、check、clippy（全特性 / 无默认特性）、测试、doctest、doc、
+bench 编译；`cargo-nextest`、`cargo-deny`、`cargo-audit` 未安装时打印 `skip`，
+不会伪装成通过。
 
 - 工具链由 `rust-toolchain.toml` 固定为最新 stable；`Cargo.toml` 刻意不声明
   `rust-version`，理由见文件内注释。
+- lint 级别集中在根 `Cargo.toml` 的 `[workspace.lints]`；`rustfmt.toml`、
+  `clippy.toml` 只放工具专属配置，依赖审计配置在 `deny.toml`。
 - 内部 API 一律 `pub(crate)`；`bdd` 的公开面仅 `run` / `run_with_options` /
   `RunOptions` / `verify_zip` / `AppError` / `FailureReport`。
 - `bdd` 的 crate 根文档即本 README（`#![doc = include_str!("../../../README.md")]`）。

@@ -14,7 +14,6 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use crate::AppError;
 use crate::app::run_with_endpoints;
 use crate::cancel::CancelToken;
-use crate::config::{AppConfig, DatasetConfig};
 use crate::dataset::{DatasetKind, DownloadJob, Interval, Market, Period};
 use crate::endpoints::Endpoints;
 use crate::prepare::lock::RunLock;
@@ -121,14 +120,6 @@ fn config_for(dir: &Path, with_start: bool) -> std::path::PathBuf {
             dir.join("out").display()
         ),
     )
-}
-
-fn klines_dataset(intervals: &[Interval]) -> DatasetConfig {
-    DatasetConfig {
-        kind: DatasetKind::Klines,
-        periods: vec![Period::Daily],
-        intervals: intervals.to_vec(),
-    }
 }
 
 fn d1_job() -> DownloadJob {
@@ -442,17 +433,14 @@ async fn resolve_start_dates_sorts_outcomes_per_symbol() {
         .map(ToString::to_string)
         .collect();
     let start = chrono::NaiveDate::from_ymd_opt(2019, 1, 1).unwrap();
-    let cfg = AppConfig {
-        symbol: symbols.clone(),
-        market: Market::Um,
-        dataset: vec![klines_dataset(&[Interval::D1])],
-        start: Some(start),
-        end: None,
-        output_dir: dir.path().to_path_buf(),
-        concurrency: 1,
-        not_found_pct_threshold: None,
-    };
-    let jobs = cfg.jobs();
+    let cfg = crate::config::for_tests(
+        Market::Um,
+        symbols.clone(),
+        vec![d1_job()],
+        Some(start),
+        dir.path().to_path_buf(),
+    );
+    let jobs = cfg.jobs().to_vec();
 
     let out = resolve_start_dates(
         &client,
@@ -503,17 +491,14 @@ async fn resolve_start_dates_never_fails_as_a_whole() {
     let cache = crate::cache::Cache::new(dir.path());
     let client = reqwest::Client::new();
     let symbols = vec!["NOPEUSDT".to_owned()];
-    let cfg = AppConfig {
-        symbol: symbols.clone(),
-        market: Market::Um,
-        dataset: vec![klines_dataset(&[Interval::D1])],
-        start: None,
-        end: None,
-        output_dir: dir.path().to_path_buf(),
-        concurrency: 1,
-        not_found_pct_threshold: None,
-    };
-    let jobs = cfg.jobs();
+    let cfg = crate::config::for_tests(
+        Market::Um,
+        symbols.clone(),
+        vec![d1_job()],
+        None,
+        dir.path().to_path_buf(),
+    );
+    let jobs = cfg.jobs().to_vec();
 
     let out = resolve_start_dates(
         &client,
@@ -548,17 +533,14 @@ async fn resolve_start_dates_stops_when_cancelled() {
     let cache = crate::cache::Cache::new(dir.path());
     let client = reqwest::Client::new();
     let symbols = vec!["AUSDT".to_owned(), "BUSDT".to_owned()];
-    let cfg = AppConfig {
-        symbol: symbols.clone(),
-        market: Market::Um,
-        dataset: vec![klines_dataset(&[Interval::D1])],
-        start: None,
-        end: None,
-        output_dir: dir.path().to_path_buf(),
-        concurrency: 1,
-        not_found_pct_threshold: None,
-    };
-    let jobs = cfg.jobs();
+    let cfg = crate::config::for_tests(
+        Market::Um,
+        symbols.clone(),
+        vec![d1_job()],
+        None,
+        dir.path().to_path_buf(),
+    );
+    let jobs = cfg.jobs().to_vec();
 
     let cancel = CancelToken::new();
     let signaller = cancel.clone();
@@ -597,17 +579,14 @@ async fn resolve_start_dates_prefers_the_archive_first_date() {
     let cache = crate::cache::Cache::new(dir.path());
     let client = reqwest::Client::new();
     let symbols = vec!["BTCUSDT".to_owned()];
-    let cfg = AppConfig {
-        symbol: symbols.clone(),
-        market: Market::Um,
-        dataset: vec![klines_dataset(&[Interval::D1])],
-        start: None,
-        end: None,
-        output_dir: dir.path().to_path_buf(),
-        concurrency: 1,
-        not_found_pct_threshold: None,
-    };
-    let jobs = cfg.jobs();
+    let cfg = crate::config::for_tests(
+        Market::Um,
+        symbols.clone(),
+        vec![d1_job()],
+        None,
+        dir.path().to_path_buf(),
+    );
+    let jobs = cfg.jobs().to_vec();
 
     let out = resolve_start_dates(
         &client,
@@ -644,17 +623,14 @@ async fn resolve_start_dates_keeps_the_api_date_when_the_archive_is_empty() {
     let cache = crate::cache::Cache::new(dir.path());
     let client = reqwest::Client::new();
     let symbols = vec!["BTCUSDT".to_owned()];
-    let cfg = AppConfig {
-        symbol: symbols.clone(),
-        market: Market::Um,
-        dataset: vec![klines_dataset(&[Interval::D1])],
-        start: None,
-        end: None,
-        output_dir: dir.path().to_path_buf(),
-        concurrency: 1,
-        not_found_pct_threshold: None,
-    };
-    let jobs = cfg.jobs();
+    let cfg = crate::config::for_tests(
+        Market::Um,
+        symbols.clone(),
+        vec![d1_job()],
+        None,
+        dir.path().to_path_buf(),
+    );
+    let jobs = cfg.jobs().to_vec();
 
     let out = resolve_start_dates(
         &client,

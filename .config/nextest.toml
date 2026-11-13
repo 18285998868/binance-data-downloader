@@ -1,0 +1,10 @@
+# Nextest profiles. `scripts/check.sh --ci` selects the `ci` profile.
+#
+# `fail-fast = false` keeps a failing test from hiding the rest of the suite;
+# CI needs the complete picture in one run.
+[profile.default]
+fail-fast = false
+
+[profile.ci]
+fail-fast = false
+retries = 0

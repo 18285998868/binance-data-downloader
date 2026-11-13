@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::AppError;
+use crate::download::DownloadError;
 
 /// Bytes every non-empty zip archive begins with.
 pub(super) const ZIP_MAGIC: &[u8; 4] = b"PK\x03\x04";
@@ -27,12 +27,12 @@ const MAX_MAGIC_CHUNKS: u32 = 8;
 ///
 /// # Errors
 ///
-/// Returns [`AppError::DownloadFailed`] for an empty or non-zip body, and
-/// [`AppError::Http`] when reading the body fails.
+/// Returns [`DownloadError::Failed`] for an empty or non-zip body, and
+/// [`DownloadError::Http`] when reading the body fails.
 pub(super) async fn read_zip_head(
     resp: &mut reqwest::Response,
     url: &str,
-) -> Result<Vec<u8>, AppError> {
+) -> Result<Vec<u8>, DownloadError> {
     let mut head = Vec::with_capacity(ZIP_MAGIC.len());
     let mut chunks_read = 0u32;
     while head.len() < ZIP_MAGIC.len() {
@@ -43,12 +43,12 @@ pub(super) async fn read_zip_head(
         match resp.chunk().await {
             Ok(Some(chunk)) => head.extend_from_slice(&chunk),
             Ok(None) => {
-                return Err(AppError::DownloadFailed {
+                return Err(DownloadError::Failed {
                     url: url.to_owned(),
                     reason: "empty response body".into(),
                 });
             }
-            Err(e) => return Err(AppError::from(e)),
+            Err(e) => return Err(DownloadError::from(e)),
         }
     }
     if &head[..ZIP_MAGIC.len()] != ZIP_MAGIC {
@@ -61,17 +61,17 @@ pub(super) async fn read_zip_head(
 ///
 /// # Errors
 ///
-/// Returns [`AppError::DownloadFailed`] when the body is shorter or longer
-/// than the declared length.
+/// Returns [`DownloadError::Failed`] when the body is shorter or longer than
+/// the declared length.
 pub(super) fn check_content_length(
     written: u64,
     expected: Option<u64>,
     url: &str,
-) -> Result<(), AppError> {
+) -> Result<(), DownloadError> {
     if let Some(expected) = expected
         && written != expected
     {
-        return Err(AppError::DownloadFailed {
+        return Err(DownloadError::Failed {
             url: url.to_owned(),
             reason: format!("incomplete download: {written}/{expected} bytes"),
         });
@@ -86,14 +86,18 @@ pub(super) fn check_content_length(
 ///
 /// # Errors
 ///
-/// Returns [`AppError::DownloadFailed`] when `verify` is set and the file does
+/// Returns [`DownloadError::Failed`] when `verify` is set and the file does
 /// not open as a zip with at least one entry.
-pub(super) async fn check_archive(path: &Path, url: &str, verify: bool) -> Result<(), AppError> {
+pub(super) async fn check_archive(
+    path: &Path,
+    url: &str,
+    verify: bool,
+) -> Result<(), DownloadError> {
     if !verify {
         return Ok(());
     }
     if let Err(e) = crate::verify::verify_zip_archive(path).await {
-        return Err(AppError::DownloadFailed {
+        return Err(DownloadError::Failed {
             url: url.to_owned(),
             reason: format!("zip verification failed: {e}"),
         });
@@ -101,8 +105,8 @@ pub(super) async fn check_archive(path: &Path, url: &str, verify: bool) -> Resul
     Ok(())
 }
 
-fn not_a_zip(url: &str) -> AppError {
-    AppError::DownloadFailed {
+fn not_a_zip(url: &str) -> DownloadError {
+    DownloadError::Failed {
         url: url.to_owned(),
         reason: "response is not a zip archive".into(),
     }

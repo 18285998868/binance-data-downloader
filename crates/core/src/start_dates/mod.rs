@@ -25,19 +25,20 @@
 use std::collections::HashMap;
 
 mod archive;
+mod error;
 mod market;
 mod merge;
 
+pub(crate) use self::error::StartDateError;
 pub(crate) use merge::resolve_start;
 use merge::{resolve_job_start, start_fallback};
 
 use futures::StreamExt;
 use futures::stream::iter as stream_iter;
 
-use crate::AppError;
 use crate::cache::Cache;
 use crate::cancel::CancelToken;
-use crate::config::AppConfig;
+use crate::config::Config;
 use crate::dataset::DownloadJob;
 use crate::endpoints::Endpoints;
 use crate::prepare::PreparedRun;
@@ -109,8 +110,8 @@ const START_DATE_FETCH_CONCURRENCY: usize = 8;
 
 /// Resolve the start date of every (symbol, job) up front.
 ///
-/// `symbols` is passed in rather than recomputed: [`AppConfig::normalized_symbols`]
-/// allocates and sorts a fresh vector on every call.
+/// `symbols` and `jobs` are passed in rather than read from `cfg`: the caller
+/// already prepared them, and borrowing the shared vectors avoids cloning.
 ///
 /// The phase observes `cancel`: a Ctrl-C stops new lookups and drops the
 /// pending stream, which also cancels the in-flight API/archive requests
@@ -118,7 +119,7 @@ const START_DATE_FETCH_CONCURRENCY: usize = 8;
 pub(crate) async fn resolve_start_dates(
     client: &reqwest::Client,
     cache: &Cache,
-    cfg: &AppConfig,
+    cfg: &Config,
     symbols: &[String],
     jobs: &[DownloadJob],
     endpoints: &Endpoints,
@@ -130,7 +131,7 @@ pub(crate) async fn resolve_start_dates(
         errors: Vec::new(),
     };
 
-    let market = cfg.market;
+    let market = cfg.market();
     let mut pending = stream_iter(symbols.iter().cloned().map(|sym| {
         let client = client.clone();
         async move {
@@ -192,10 +193,9 @@ pub(crate) async fn resolve_start_dates(
                 }
                 out.dates.insert(sym, by_job);
             }
-            Err(AppError::UnknownSymbol { .. }) => {
+            Err(error @ StartDateError::UnknownSymbol { .. }) => {
                 // The exchange does not know the symbol: fatal, so a typo
                 // cannot masquerade as success.
-                let error = api.expect_err("the arm matches an error");
                 tracing::error!(symbol = %sym, error = ?error, "start-date fetch failed");
                 out.errors.push(format!("{sym}/*: {error}"));
                 out.failed.push(sym);
@@ -221,7 +221,7 @@ pub(crate) async fn resolve_start_dates(
                         "start-date API lookup failed, but the archive listing answered for every job",
                     );
                     out.dates.insert(sym, by_job);
-                } else if let Some(fallback) = start_fallback(&error, cfg.start) {
+                } else if let Some(fallback) = start_fallback(&error, cfg.start()) {
                     tracing::warn!(
                         symbol = %sym,
                         start = %fallback,
@@ -255,7 +255,7 @@ pub(crate) async fn resolve_start_dates(
 ///
 /// Logs the aggregate outcome once; per-pair details stay in
 /// [`StartDateResolution`].
-pub(crate) async fn resolve(prepared: &PreparedRun, cfg: &AppConfig) -> StartDateResolution {
+pub(crate) async fn resolve(prepared: &PreparedRun, cfg: &Config) -> StartDateResolution {
     let resolution = resolve_start_dates(
         &prepared.client,
         &prepared.cache,
@@ -282,7 +282,6 @@ pub(crate) async fn resolve(prepared: &PreparedRun, cfg: &AppConfig) -> StartDat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DatasetConfig;
     use crate::dataset::{DatasetKind, Interval, Market, Period};
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -343,21 +342,15 @@ mod tests {
         symbols: &[String],
         intervals: &[Interval],
         start: Option<chrono::NaiveDate>,
-    ) -> AppConfig {
-        AppConfig {
-            market: Market::Um,
-            symbol: symbols.to_vec(),
+    ) -> Config {
+        let jobs = intervals.iter().copied().map(klines_job).collect();
+        crate::config::for_tests(
+            Market::Um,
+            symbols.to_vec(),
+            jobs,
             start,
-            end: None,
-            output_dir: std::path::PathBuf::from("/tmp/bdd-start-dates-test"),
-            concurrency: 1,
-            not_found_pct_threshold: None,
-            dataset: vec![DatasetConfig {
-                kind: DatasetKind::Klines,
-                periods: vec![Period::Daily],
-                intervals: intervals.to_vec(),
-            }],
-        }
+            std::path::PathBuf::from("/tmp/bdd-start-dates-test"),
+        )
     }
 
     #[tokio::test]

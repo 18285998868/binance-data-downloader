@@ -11,7 +11,7 @@ pub(crate) mod signal;
 use crate::AppError;
 use crate::cache::Cache;
 use crate::cancel::CancelToken;
-use crate::config::AppConfig;
+use crate::config::Config;
 use crate::dataset::DownloadJob;
 use crate::endpoints::Endpoints;
 use crate::scan::LocalFileSet;
@@ -49,27 +49,27 @@ pub(crate) struct PreparedRun {
 /// Returns [`AppError`] when the output directory is already locked by another
 /// run, the HTTP client cannot be built, or the local file scan fails.
 pub(crate) async fn run(
-    cfg: &AppConfig,
+    cfg: &Config,
     endpoints: Endpoints,
     cancel: CancelToken,
 ) -> Result<PreparedRun, AppError> {
     // Concurrent runs over one output directory are not supported: they would
     // contend on the same `redb` cache file and race on destination files. The
     // guard turns that into an immediate, explicit error.
-    let lock = RunLock::acquire(&cfg.output_dir).await?;
+    let lock = RunLock::acquire(cfg.output_dir()).await?;
 
-    let cache = Cache::new(&cfg.output_dir);
+    let cache = Cache::new(cfg.output_dir());
     let client = client::build()?;
-    let local = crate::scan::scan_local_files(&cfg.output_dir).await?;
+    let local = crate::scan::scan_local_files(cfg.output_dir()).await?;
 
     // The configured concurrency is a request; the descriptor limit has the
     // final say. Every in-flight download holds a socket *and* a temporary
     // file, so exceeding the limit turns into `EMFILE` and a wave of failed
     // downloads rather than a faster run.
-    let concurrency = crate::limits::effective_concurrency(cfg.concurrency);
-    if concurrency < cfg.concurrency {
+    let concurrency = crate::limits::effective_concurrency(cfg.concurrency());
+    if concurrency < cfg.concurrency() {
         tracing::warn!(
-            requested = cfg.concurrency,
+            requested = cfg.concurrency(),
             effective = concurrency,
             "concurrency reduced to fit the process descriptor limit",
         );
@@ -77,11 +77,11 @@ pub(crate) async fn run(
 
     // The archive partitions days by UTC midnight, so "yesterday" must be UTC.
     let end = cfg.resolved_end(chrono::Utc::now().date_naive());
-    let symbols = cfg.normalized_symbols();
-    let jobs = cfg.jobs();
+    let symbols = cfg.symbols().to_vec();
+    let jobs = cfg.jobs().to_vec();
 
     tracing::info!(
-        market = %cfg.market,
+        market = %cfg.market(),
         symbols = symbols.len(),
         jobs = jobs.len(),
         total = symbols.len() * jobs.len(),
@@ -89,7 +89,7 @@ pub(crate) async fn run(
         local_files = local.len(),
         "starting batch download",
     );
-    if cfg.start.is_none() {
+    if cfg.start().is_none() {
         tracing::info!(
             count = symbols.len(),
             "the first start-date of every symbol is resolved up front -- one request to \

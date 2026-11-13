@@ -89,21 +89,22 @@ impl<E> RetryError<E> {
 ///
 /// `operation` must only perform idempotent work. Every delay, including a
 /// server-provided `Retry-After`, is capped at `deadline`; a permanent error
-/// stops immediately. The returned error is the underlying [`AppError`], so
-/// callers do not need to unwrap the retry wrapper.
+/// stops immediately. The returned error is the underlying `E`, so callers do
+/// not need to unwrap the retry wrapper.
 ///
 /// # Errors
 ///
 /// Returns the final underlying error when the operation is permanent or the
 /// retry budget is exhausted.
-pub(crate) async fn retry_operation<T, F, Fut>(
+pub(crate) async fn retry_operation<T, E, F, Fut>(
     policy: RetryPolicy,
     deadline: Instant,
     operation: F,
-) -> Result<T, crate::AppError>
+) -> Result<T, E>
 where
+    E: std::fmt::Display,
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, RetryError<crate::AppError>>>,
+    Fut: Future<Output = Result<T, RetryError<E>>>,
 {
     let result = operation
         .retry(policy)

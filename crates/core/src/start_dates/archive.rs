@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use futures::StreamExt;
 
-use crate::AppError;
+use super::StartDateError;
 use crate::backoff::{
     RETRY_WINDOW, RetryError, default_retry_policy, is_transient_status, parse_retry_after,
     retry_operation,
@@ -48,15 +48,15 @@ fn listing_url(base: &str, prefix: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`AppError::Api`] when the listing request fails or answers with a
-/// non-success status, and [`AppError::Data`] when the response is not a
-/// parseable listing.
+/// Returns [`StartDateError::Api`] when the listing request fails or answers
+/// with a non-success status, and [`StartDateError::Listing`] when the response
+/// is not a parseable listing.
 pub(crate) async fn first_archive_date(
     client: &reqwest::Client,
     base: &str,
     prefix: &str,
     period: Period,
-) -> Result<Option<chrono::NaiveDate>, AppError> {
+) -> Result<Option<chrono::NaiveDate>, StartDateError> {
     let url = listing_url(base, prefix);
     let deadline = std::time::Instant::now() + RETRY_WINDOW;
     let op = || {
@@ -67,7 +67,7 @@ pub(crate) async fn first_archive_date(
             // guard also avoids starting an attempt that was queued just before
             // the cutoff.
             if std::time::Instant::now() >= deadline {
-                return Err(RetryError::permanent(AppError::Api {
+                return Err(RetryError::permanent(StartDateError::Api {
                     status: None,
                     message: format!("retry window elapsed for {u}"),
                 }));
@@ -75,12 +75,12 @@ pub(crate) async fn first_archive_date(
             let resp = match c.get(&u).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(RetryError::transient(AppError::from(e), None));
+                    return Err(RetryError::transient(StartDateError::from(e), None));
                 }
             };
             let status = resp.status();
             if status != reqwest::StatusCode::OK {
-                let err = AppError::Api {
+                let err = StartDateError::Api {
                     status: Some(status.as_u16()),
                     message: format!("HTTP {status} for {u}"),
                 };
@@ -92,17 +92,13 @@ pub(crate) async fn first_archive_date(
             }
             match resp.text().await {
                 Ok(body) => Ok(body),
-                Err(e) => Err(RetryError::transient(AppError::from(e), None)),
+                Err(e) => Err(RetryError::transient(StartDateError::from(e), None)),
             }
         }
     };
 
     let body = retry_operation(default_retry_policy(), deadline, op).await?;
-    parse_first_key_date(&body, period).map_err(|e| {
-        AppError::Data(crate::error::FailureReport::new(format!(
-            "archive listing is unparseable: {e}"
-        )))
-    })
+    parse_first_key_date(&body, period).map_err(StartDateError::Listing)
 }
 
 /// Extract the date of the first `<Key>` of an S3 listing.
@@ -438,7 +434,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, AppError::Api { .. }), "got {err:?}");
+        assert!(matches!(err, StartDateError::Api { .. }), "got {err:?}");
     }
 
     #[tokio::test]

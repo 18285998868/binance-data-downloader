@@ -5,7 +5,7 @@
 //! USDⓈ-M and COIN-M use different bases and paths; the market value selects
 //! them.
 
-use crate::AppError;
+use super::StartDateError;
 use crate::backoff::{
     RETRY_WINDOW, RetryError, default_retry_policy, is_transient_status, parse_retry_after,
     retry_operation,
@@ -55,8 +55,8 @@ fn parse_cached_date(raw: &[u8]) -> Option<chrono::NaiveDate> {
 ///
 /// # Errors
 ///
-/// Returns [`AppError::UnknownSymbol`] for unknown symbols,
-/// [`AppError::Api`] for other Binance API failures, and [`AppError::Date`]
+/// Returns [`StartDateError::UnknownSymbol`] for unknown symbols,
+/// [`StartDateError::Api`] for other Binance API failures, and [`StartDateError::Date`]
 /// for unparseable timestamps. A corrupt cache entry is treated as a cache
 /// miss (warn + refetch), never an error.
 #[tracing::instrument(skip(client, cache), fields(market = %market, symbol = %symbol))]
@@ -66,7 +66,7 @@ pub(crate) async fn get_first_kline_date(
     market: Market,
     api_base: &str,
     symbol: &str,
-) -> Result<chrono::NaiveDate, AppError> {
+) -> Result<chrono::NaiveDate, StartDateError> {
     let key = format!("{}:{symbol}", market.as_path());
     match cache
         .read_async(CACHE_DOMAIN, &key, Some(crate::cache::CACHE_TTL_SECS))
@@ -116,7 +116,7 @@ async fn fetch_first_kline(
     base: &str,
     market: Market,
     symbol: &str,
-) -> Result<chrono::NaiveDate, AppError> {
+) -> Result<chrono::NaiveDate, StartDateError> {
     let url = klines_url(base, market, symbol, "1m");
 
     let deadline = std::time::Instant::now() + RETRY_WINDOW;
@@ -130,7 +130,7 @@ async fn fetch_first_kline(
             // at the cutoff. An already in-flight request is bounded by the
             // client's 300-second whole-request timeout instead.
             if std::time::Instant::now() >= deadline {
-                return Err(RetryError::permanent(AppError::Api {
+                return Err(RetryError::permanent(StartDateError::Api {
                     status: None,
                     message: format!("retry window elapsed for {u}"),
                 }));
@@ -138,14 +138,14 @@ async fn fetch_first_kline(
             let r = match c.get(&u).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(RetryError::transient(AppError::from(e), None));
+                    return Err(RetryError::transient(StartDateError::from(e), None));
                 }
             };
             let status = r.status();
             if !status.is_success() {
                 return if is_transient_status(status) {
                     Err(RetryError::transient(
-                        AppError::Api {
+                        StartDateError::Api {
                             status: Some(status.as_u16()),
                             message: format!("HTTP {status} for {u}"),
                         },
@@ -158,11 +158,11 @@ async fn fetch_first_kline(
                     // from a transient outage.
                     let body = r.text().await.ok();
                     if is_unknown_symbol_body(body.as_deref()) {
-                        Err(RetryError::permanent(AppError::UnknownSymbol {
+                        Err(RetryError::permanent(StartDateError::UnknownSymbol {
                             symbol: symbol.to_string(),
                         }))
                     } else {
-                        Err(RetryError::permanent(AppError::Api {
+                        Err(RetryError::permanent(StartDateError::Api {
                             status: Some(status.as_u16()),
                             message: format!("HTTP {status} for {u}"),
                         }))
@@ -172,7 +172,7 @@ async fn fetch_first_kline(
             let body = match r.text().await {
                 Ok(body) => body,
                 Err(e) => {
-                    return Err(RetryError::transient(AppError::from(e), None));
+                    return Err(RetryError::transient(StartDateError::from(e), None));
                 }
             };
             // Binance reports failures (e.g. an unknown symbol) as an object
@@ -185,28 +185,28 @@ async fn fetch_first_kline(
                         return Err(RetryError::permanent(err));
                     }
                     // Not klines and not an envelope: the body is unparseable.
-                    return Err(RetryError::permanent(AppError::Json(parse_err)));
+                    return Err(RetryError::permanent(StartDateError::Json(parse_err)));
                 }
             };
             let Some(row) = klines.first() else {
-                return Err(RetryError::permanent(AppError::Api {
+                return Err(RetryError::permanent(StartDateError::Api {
                     status: None,
                     message: format!("no klines for {u}"),
                 }));
             };
             let Some(open_time) = row.first().and_then(serde_json::Value::as_u64) else {
-                return Err(RetryError::permanent(AppError::Api {
+                return Err(RetryError::permanent(StartDateError::Api {
                     status: None,
                     message: format!("open time missing for {u}"),
                 }));
             };
             let Ok(ms) = i64::try_from(open_time) else {
-                return Err(RetryError::permanent(AppError::Date(format!(
+                return Err(RetryError::permanent(StartDateError::Date(format!(
                     "timestamp out of range: {open_time}"
                 ))));
             };
             let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) else {
-                return Err(RetryError::permanent(AppError::Date(format!(
+                return Err(RetryError::permanent(StartDateError::Date(format!(
                     "invalid timestamp: {ms}"
                 ))));
             };
@@ -224,14 +224,14 @@ fn is_unknown_symbol_body(body: Option<&str>) -> bool {
 }
 
 /// Turn a non-kline JSON body into an error, if it is a Binance error envelope.
-fn api_error_from_body(body: &str, symbol: &str) -> Option<AppError> {
+fn api_error_from_body(body: &str, symbol: &str) -> Option<StartDateError> {
     let err = serde_json::from_str::<ApiErrorBody>(body).ok()?;
     if err.code == UNKNOWN_SYMBOL_CODE {
-        return Some(AppError::UnknownSymbol {
+        return Some(StartDateError::UnknownSymbol {
             symbol: symbol.to_owned(),
         });
     }
-    Some(AppError::Api {
+    Some(StartDateError::Api {
         status: None,
         message: format!("api error {}: {}", err.code, err.msg),
     })
@@ -308,7 +308,7 @@ mod tests {
         let err = fetch_first_kline(&client, &server.uri(), Market::Um, "NOPEUSDT")
             .await
             .unwrap_err();
-        assert!(matches!(err, AppError::UnknownSymbol { .. }));
+        assert!(matches!(err, StartDateError::UnknownSymbol { .. }));
     }
 
     #[tokio::test]
@@ -391,7 +391,7 @@ mod tests {
             .unwrap_err();
         // An unparseable body is neither klines nor an error envelope, so it
         // surfaces through the dedicated Json variant.
-        assert!(matches!(err, AppError::Json(_)), "got {err:?}");
+        assert!(matches!(err, StartDateError::Json(_)), "got {err:?}");
     }
 
     #[test]
@@ -437,7 +437,7 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            AppError::Api { message, .. } => {
+            StartDateError::Api { message, .. } => {
                 assert!(message.contains("-2013"), "unexpected message: {message}");
                 assert!(
                     message.contains("No klines"),
@@ -465,7 +465,10 @@ mod tests {
         let err = fetch_first_kline(&client, &server.uri(), Market::Um, "NOPEUSDT")
             .await
             .unwrap_err();
-        assert!(matches!(err, AppError::UnknownSymbol { .. }), "got {err:?}");
+        assert!(
+            matches!(err, StartDateError::UnknownSymbol { .. }),
+            "got {err:?}"
+        );
         assert!(err.to_string().contains("NOPEUSDT"));
     }
 
@@ -494,7 +497,7 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            AppError::Api { message, .. } => assert!(message.contains("no klines")),
+            StartDateError::Api { message, .. } => assert!(message.contains("no klines")),
             other => panic!("expected Api, got {other:?}"),
         }
     }
@@ -512,7 +515,7 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            AppError::Api { message, .. } => assert!(message.contains("open time")),
+            StartDateError::Api { message, .. } => assert!(message.contains("open time")),
             other => panic!("expected Api, got {other:?}"),
         }
     }
@@ -593,7 +596,7 @@ mod tests {
         let err = fetch_first_kline(&client, &server.uri(), Market::Um, "NOPEUSDT")
             .await
             .unwrap_err();
-        assert!(matches!(err, AppError::UnknownSymbol { .. }));
+        assert!(matches!(err, StartDateError::UnknownSymbol { .. }));
         assert!(err.to_string().contains("NOPEUSDT"));
     }
 }

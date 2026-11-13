@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "binance-data-verify"
-path = "src/bin/verify.rs"
+path = "src/bin/verify/main.rs"
 
 [dependencies]
 bdd = { path = "../core", version = "0.1.0" }

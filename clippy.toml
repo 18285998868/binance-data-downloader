@@ -1,0 +1,9 @@
+# Clippy-specific configuration. Lint levels live in the workspace manifest
+# (`[workspace.lints]`), not here.
+#
+# Tests may use unwrap/expect/panic for brevity. These switches only matter if
+# the corresponding restriction lints are enabled; keeping them here makes the
+# policy explicit before that happens.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

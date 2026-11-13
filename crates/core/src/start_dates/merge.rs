@@ -1,6 +1,6 @@
 //! Combining the API and archive dates into the day a pair starts at.
 
-use crate::AppError;
+use super::StartDateError;
 use crate::dataset::{DatasetKind, DownloadJob};
 
 ///
@@ -34,11 +34,11 @@ pub(crate) fn resolve_start(
 /// run proceeds from that date. An unknown-symbol error stays fatal, so typos
 /// cannot masquerade as success.
 pub(super) fn start_fallback(
-    err: &AppError,
+    err: &StartDateError,
     cfg_start: Option<chrono::NaiveDate>,
 ) -> Option<chrono::NaiveDate> {
     match (cfg_start, err) {
-        (Some(start), e) if !matches!(e, AppError::UnknownSymbol { .. }) => Some(start),
+        (Some(start), e) if !matches!(e, StartDateError::UnknownSymbol { .. }) => Some(start),
         _ => None,
     }
 }
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn start_fallback_used_when_cfg_start_is_set() {
         let start = date(2024, 1, 1);
-        let err = AppError::Api {
+        let err = StartDateError::Api {
             status: None,
             message: "network down".into(),
         };
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn start_fallback_rejected_for_unknown_symbol() {
         let start = date(2024, 1, 1);
-        let err = AppError::UnknownSymbol {
+        let err = StartDateError::UnknownSymbol {
             symbol: "NOPEUSDT".into(),
         };
         assert_eq!(start_fallback(&err, Some(start)), None);
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn start_fallback_needs_cfg_start() {
-        let err = AppError::Api {
+        let err = StartDateError::Api {
             status: None,
             message: "network down".into(),
         };

@@ -5,14 +5,16 @@
 //! sample and the circuit breaker meaningful, and avoids thousands of
 //! independent file downloads competing for the same descriptors.
 
+mod error;
 mod fetch;
 mod pair;
 mod tasks;
 
-use crate::config::AppConfig;
+use crate::config::Config;
 use crate::prepare::PreparedRun;
 use crate::start_dates::StartDateResolution;
 
+pub(crate) use self::error::DownloadError;
 use self::fetch::DownloadFailure;
 pub(crate) use self::fetch::DownloadStats;
 
@@ -43,7 +45,7 @@ pub(crate) struct PairBatchSummary {
 /// fails or the run is cancelled.
 pub(crate) async fn run(
     prepared: &PreparedRun,
-    cfg: &AppConfig,
+    cfg: &Config,
     resolution: &StartDateResolution,
     verify: bool,
 ) -> PairBatchSummary {

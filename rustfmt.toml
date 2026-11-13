@@ -1,0 +1,7 @@
+# Rustfmt configuration shared by the workspace.
+#
+# Keep this file on stable options only: an unstable option would silently
+# fall back to the default on CI, so formatting would differ between machines.
+edition = "2024"
+newline_style = "Unix"
+use_field_init_shorthand = true

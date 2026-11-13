@@ -1,7 +1,7 @@
 //! Step 5: decide the run's outcome and build the failure report.
 
 use crate::AppError;
-use crate::config::AppConfig;
+use crate::config::Config;
 use crate::download::{MAX_CONSECUTIVE_PAIR_FAILURES, PairBatchSummary};
 use crate::error::FailureReport;
 use crate::prepare::PreparedRun;
@@ -20,7 +20,7 @@ use crate::start_dates::StartDateResolution;
 /// failed, or when the not-found share reached the configured threshold.
 pub(crate) fn finish(
     prepared: &PreparedRun,
-    cfg: &AppConfig,
+    cfg: &Config,
     resolution: &StartDateResolution,
     summary: &PairBatchSummary,
 ) -> Result<(), AppError> {
@@ -68,7 +68,7 @@ pub(crate) fn finish(
     let not_found_pct = totals.not_found_pct();
     let too_many_not_found = !partial_cancelled
         && cfg
-            .not_found_pct_threshold
+            .not_found_pct_threshold()
             .is_some_and(|threshold| not_found_pct >= threshold);
     if total_failures == 0 && !too_many_not_found {
         if prepared.cancel.is_cancelled() {
@@ -101,7 +101,7 @@ pub(crate) fn finish(
         if too_many_not_found {
             causes.push(format!(
                 "not-found share {not_found_pct:.1}% reached the configured threshold of {:.1}%",
-                cfg.not_found_pct_threshold.unwrap_or_default()
+                cfg.not_found_pct_threshold().unwrap_or_default()
             ));
         }
         let listed_errors = errors.len();

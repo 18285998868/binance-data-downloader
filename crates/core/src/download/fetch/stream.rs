@@ -8,6 +8,7 @@ use crate::backoff::{
     parse_retry_after, retry_operation,
 };
 use crate::cancel::CancelToken;
+use crate::download::DownloadError;
 use crate::download::tasks::DownloadTask;
 
 /// Download a zip file with retry, streaming directly to disk.
@@ -21,22 +22,22 @@ use crate::download::tasks::DownloadTask;
 /// archive and checked to hold at least one entry; a corrupt archive is
 /// retried like any other transient failure.
 ///
-/// Returns [`crate::AppError::Cancelled`] as soon as `cancel` fires, which
+/// Returns [`DownloadError::Cancelled`] as soon as `cancel` fires, which
 /// abandons the in-flight request without landing a partial destination file.
 ///
 /// # Errors
 ///
-/// Returns [`crate::AppError::NotFound`] for a 404 (permanent, not retried),
-/// [`crate::AppError::DownloadFailed`] for HTTP or content-validation
-/// failures, and [`crate::AppError::Io`] / [`crate::AppError::Http`] for
-/// local I/O and transport errors.
+/// Returns [`DownloadError::NotFound`] for a 404 (permanent, not retried),
+/// [`DownloadError::Failed`] for HTTP or content-validation failures, and
+/// [`DownloadError::Io`] / [`DownloadError::Http`] for local I/O and transport
+/// errors.
 #[tracing::instrument(skip(client, task, cancel), fields(url = %task.url))]
 pub(crate) async fn download_to_file(
     client: &reqwest::Client,
     task: &DownloadTask,
     cancel: &CancelToken,
     verify: bool,
-) -> Result<(), crate::AppError> {
+) -> Result<(), DownloadError> {
     download_to_file_with_backoff(
         client,
         task,
@@ -122,7 +123,7 @@ async fn download_to_file_with_backoff(
     window: std::time::Duration,
     cancel: &CancelToken,
     verify: bool,
-) -> Result<(), crate::AppError> {
+) -> Result<(), DownloadError> {
     let tmp_path = tmp_path_for(&task.dest);
     let deadline = std::time::Instant::now() + window;
     let op = || {
@@ -137,7 +138,7 @@ async fn download_to_file_with_backoff(
             // at the cutoff. An already in-flight request is bounded by the
             // client's 300-second whole-request timeout instead.
             if std::time::Instant::now() >= deadline {
-                return Err(RetryError::Permanent(crate::AppError::DownloadFailed {
+                return Err(RetryError::Permanent(DownloadError::Failed {
                     url: u,
                     reason: "retry window elapsed".into(),
                 }));
@@ -146,7 +147,7 @@ async fn download_to_file_with_backoff(
                 Ok(r) => r,
                 Err(e) => {
                     return Err(RetryError::Transient {
-                        err: crate::AppError::from(e),
+                        err: DownloadError::from(e),
                         retry_after: None,
                     });
                 }
@@ -157,17 +158,17 @@ async fn download_to_file_with_backoff(
                 // accepting every 2xx would let an unexpected `206 Partial
                 // Content` land a truncated file with a valid zip magic.
                 return if status == reqwest::StatusCode::NOT_FOUND {
-                    Err(RetryError::Permanent(crate::AppError::NotFound { url: u }))
+                    Err(RetryError::Permanent(DownloadError::NotFound { url: u }))
                 } else if is_transient_status(status) {
                     Err(RetryError::Transient {
-                        err: crate::AppError::DownloadFailed {
+                        err: DownloadError::Failed {
                             url: u,
                             reason: format!("HTTP {status}"),
                         },
                         retry_after: parse_retry_after(&resp),
                     })
                 } else {
-                    Err(RetryError::Permanent(crate::AppError::DownloadFailed {
+                    Err(RetryError::Permanent(DownloadError::Failed {
                         url: u,
                         reason: format!("HTTP {status}"),
                     }))
@@ -191,37 +192,37 @@ async fn download_to_file_with_backoff(
             if let Some(p) = dest.parent() {
                 tokio::fs::create_dir_all(p)
                     .await
-                    .map_err(|e| RetryError::Permanent(crate::AppError::Io(e)))?;
+                    .map_err(|e| RetryError::Permanent(DownloadError::Io(e)))?;
             }
 
             match tokio::fs::remove_file(&tmp).await {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(RetryError::Permanent(crate::AppError::Io(e))),
+                Err(e) => return Err(RetryError::Permanent(DownloadError::Io(e))),
             }
             // Declared before the writer: locals drop in reverse order, so the
             // file is closed before the guard tries to unlink it.
             let temp_guard = TempFileGuard::new(tmp.clone());
             let file = tokio::fs::File::create(&tmp)
                 .await
-                .map_err(|e| RetryError::Permanent(crate::AppError::Io(e)))?;
+                .map_err(|e| RetryError::Permanent(DownloadError::Io(e)))?;
             let mut writer = tokio::io::BufWriter::new(file);
 
             let mut written: u64 = head.len() as u64;
             writer
                 .write_all(&head)
                 .await
-                .map_err(|e| RetryError::Permanent(crate::AppError::Io(e)))?;
+                .map_err(|e| RetryError::Permanent(DownloadError::Io(e)))?;
 
             while let Some(chunk) = resp.chunk().await.map_err(|e| RetryError::Transient {
-                err: crate::AppError::from(e),
+                err: DownloadError::from(e),
                 retry_after: None,
             })? {
                 written += chunk.len() as u64;
                 writer
                     .write_all(&chunk)
                     .await
-                    .map_err(|e| RetryError::Permanent(crate::AppError::Io(e)))?;
+                    .map_err(|e| RetryError::Permanent(DownloadError::Io(e)))?;
             }
 
             // The body must match Content-Length when the server provided it.
@@ -235,7 +236,7 @@ async fn download_to_file_with_backoff(
             writer
                 .flush()
                 .await
-                .map_err(|e| RetryError::Permanent(crate::AppError::Io(e)))?;
+                .map_err(|e| RetryError::Permanent(DownloadError::Io(e)))?;
             // Persist the payload before the rename. Without this, a power loss
             // can leave a correctly named file whose contents are empty or
             // partially written.
@@ -243,7 +244,7 @@ async fn download_to_file_with_backoff(
                 .get_ref()
                 .sync_all()
                 .await
-                .map_err(|e| RetryError::Permanent(crate::AppError::Io(e)))?;
+                .map_err(|e| RetryError::Permanent(DownloadError::Io(e)))?;
             drop(writer);
 
             // Optional structural check of the finished file. A corrupt
@@ -257,13 +258,13 @@ async fn download_to_file_with_backoff(
 
             tokio::fs::rename(&tmp, &dest)
                 .await
-                .map_err(|e| RetryError::Permanent(crate::AppError::Io(e)))?;
+                .map_err(|e| RetryError::Permanent(DownloadError::Io(e)))?;
             temp_guard.keep();
             // The rename itself must be durable too; on Unix that requires an
             // fsync of the directory entry.
             sync_parent_dir(&dest)
                 .await
-                .map_err(|e| RetryError::Permanent(crate::AppError::Io(e)))?;
+                .map_err(|e| RetryError::Permanent(DownloadError::Io(e)))?;
 
             Ok(())
         }
@@ -275,7 +276,7 @@ async fn download_to_file_with_backoff(
     // `TempFileGuard` then removes its partial file as it drops.
     tokio::select! {
         biased;
-        () = cancel.cancelled() => Err(crate::AppError::Cancelled),
+        () = cancel.cancelled() => Err(DownloadError::Cancelled),
         res = retry_operation(policy, deadline, op) => res,
     }
 }
@@ -283,7 +284,6 @@ async fn download_to_file_with_backoff(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AppError;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -355,7 +355,7 @@ mod tests {
         let result =
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
                 .await;
-        assert!(matches!(result, Err(AppError::DownloadFailed { .. })));
+        assert!(matches!(result, Err(DownloadError::Failed { .. })));
         assert!(!task.dest.exists());
         assert!(!tmp_path_for(&task.dest).exists());
     }
@@ -375,7 +375,7 @@ mod tests {
         let result =
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
                 .await;
-        assert!(matches!(result, Err(AppError::NotFound { .. })));
+        assert!(matches!(result, Err(DownloadError::NotFound { .. })));
     }
 
     #[tokio::test]
@@ -394,7 +394,7 @@ mod tests {
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
                 .await;
         match result {
-            Err(AppError::DownloadFailed { reason, .. }) => assert!(reason.contains("206")),
+            Err(DownloadError::Failed { reason, .. }) => assert!(reason.contains("206")),
             other => panic!("expected DownloadFailed, got {other:?}"),
         }
         assert!(!task.dest.exists());
@@ -519,7 +519,7 @@ mod tests {
         )
         .await;
         let result = result.expect("download did not respect the retry window");
-        assert!(matches!(result, Err(AppError::DownloadFailed { .. })));
+        assert!(matches!(result, Err(DownloadError::Failed { .. })));
     }
 
     #[tokio::test]
@@ -537,7 +537,7 @@ mod tests {
         let result =
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
                 .await;
-        assert!(matches!(result, Err(AppError::DownloadFailed { .. })));
+        assert!(matches!(result, Err(DownloadError::Failed { .. })));
     }
 
     #[tokio::test]
@@ -603,7 +603,7 @@ mod tests {
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
                 .await;
         match result {
-            Err(AppError::DownloadFailed { reason, .. }) => assert!(reason.contains("400")),
+            Err(DownloadError::Failed { reason, .. }) => assert!(reason.contains("400")),
             other => panic!("expected DownloadFailed, got {other:?}"),
         }
         assert!(!task.dest.exists());
@@ -689,7 +689,7 @@ mod tests {
         .await
         .expect("the retry loop must stop at the window");
         match result {
-            Err(AppError::DownloadFailed { reason, .. }) => {
+            Err(DownloadError::Failed { reason, .. }) => {
                 assert!(reason.contains("retry window elapsed"), "{reason}");
             }
             other => panic!("expected a download failure, got {other:?}"),
@@ -717,7 +717,7 @@ mod tests {
         let result =
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
                 .await;
-        assert!(matches!(result, Err(AppError::Cancelled)));
+        assert!(matches!(result, Err(DownloadError::Cancelled)));
         assert!(!task.dest.exists());
     }
 
@@ -757,7 +757,7 @@ mod tests {
         .expect("cancellation must interrupt the retry loop promptly");
         handle.await.unwrap();
 
-        assert!(matches!(result, Err(AppError::Cancelled)));
+        assert!(matches!(result, Err(DownloadError::Cancelled)));
         assert!(
             !task.dest.exists(),
             "an aborted download must not land a file"
@@ -845,7 +845,7 @@ mod tests {
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, true)
                 .await;
         match result {
-            Err(AppError::DownloadFailed { reason, .. }) => {
+            Err(DownloadError::Failed { reason, .. }) => {
                 assert!(reason.contains("zip verification failed"), "got: {reason}");
             }
             other => panic!("expected DownloadFailed, got {other:?}"),
@@ -965,7 +965,7 @@ mod tests {
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
                 .await;
         match result {
-            Err(AppError::DownloadFailed { reason, .. }) => {
+            Err(DownloadError::Failed { reason, .. }) => {
                 assert!(reason.contains("not a zip"), "unexpected: {reason}");
             }
             other => panic!("expected DownloadFailed, got {other:?}"),
@@ -988,6 +988,6 @@ mod tests {
         let result =
             download_to_file_with_backoff(&client, &task, no_retry(), RETRY_WINDOW, &cancel, false)
                 .await;
-        assert!(matches!(result, Err(AppError::DownloadFailed { .. })));
+        assert!(matches!(result, Err(DownloadError::Failed { .. })));
     }
 }

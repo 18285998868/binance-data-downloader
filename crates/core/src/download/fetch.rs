@@ -5,6 +5,7 @@ mod validate;
 
 use std::future::Future;
 
+use super::DownloadError;
 use super::tasks::DownloadTask;
 use crate::AppError;
 use futures::stream::{StreamExt, iter as stream_iter};
@@ -97,7 +98,7 @@ pub(crate) struct FailedDownload {
     /// The URL that was being downloaded.
     pub url: String,
     /// Why it failed.
-    pub error: AppError,
+    pub error: DownloadError,
 }
 
 impl std::fmt::Display for FailedDownload {
@@ -180,9 +181,9 @@ where
         match result {
             Ok(()) => stats.ok += 1,
             Err(failure) => {
-                if matches!(&failure.error, AppError::NotFound { .. }) {
+                if matches!(&failure.error, DownloadError::NotFound { .. }) {
                     stats.not_found += 1;
-                } else if matches!(&failure.error, AppError::Cancelled) {
+                } else if matches!(&failure.error, DownloadError::Cancelled) {
                     // Cancellation is not a failure: stop scheduling at once
                     // and let the remaining temp files be reclaimed by the
                     // next scan.
@@ -255,7 +256,7 @@ mod tests {
     // — run_downloads_inner —
 
     /// A failed download, for the tests.
-    fn failed(url: &str, error: AppError) -> FailedDownload {
+    fn failed(url: &str, error: DownloadError) -> FailedDownload {
         FailedDownload {
             url: url.to_owned(),
             error,
@@ -304,7 +305,7 @@ mod tests {
             if t.pair == "a" {
                 Err(failed(
                     "http://x",
-                    AppError::NotFound {
+                    DownloadError::NotFound {
                         url: "http://x".into(),
                     },
                 ))
@@ -328,13 +329,13 @@ mod tests {
             match t.pair.as_str() {
                 "a" => Err(failed(
                     "http://x",
-                    AppError::NotFound {
+                    DownloadError::NotFound {
                         url: "http://x".into(),
                     },
                 )),
                 "b" => Err(failed(
                     "x",
-                    AppError::DownloadFailed {
+                    DownloadError::Failed {
                         url: "x".into(),
                         reason: "bad".into(),
                     },
@@ -356,7 +357,7 @@ mod tests {
             if t.pair == "b" {
                 Err(failed(
                     "x",
-                    AppError::DownloadFailed {
+                    DownloadError::Failed {
                         url: "x".into(),
                         reason: "bad".into(),
                     },
@@ -381,7 +382,7 @@ mod tests {
             if t.pair == "b" {
                 Err(failed(
                     "http://x/b.zip",
-                    AppError::DownloadFailed {
+                    DownloadError::Failed {
                         url: "http://x/b.zip".into(),
                         reason: "HTTP 500".into(),
                     },

@@ -1,19 +1,19 @@
 //! Raw TOML schema and defaults.
 //!
-//! `AppConfig` is the deserialized shape; semantic checks live in
-//! [`super::validate`].
+//! These types only describe the file. Semantic checks, normalization and the
+//! expansion into concrete jobs live in [`super::validate`]; business code only
+//! ever sees [`super::Config`].
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::AppError;
 use crate::dataset::{DatasetKind, Interval, Market, Period};
 
 /// One `[[dataset]]` entry.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DatasetConfig {
+pub(crate) struct RawDataset {
     /// Dataset family, e.g. `klines` or `fundingRate`.
     #[serde(rename = "type")]
     pub(crate) kind: DatasetKind,
@@ -24,17 +24,14 @@ pub(crate) struct DatasetConfig {
     pub(crate) intervals: Vec<Interval>,
 }
 
-/// Application configuration.
+/// Application configuration as written in TOML.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AppConfig {
+pub(crate) struct RawConfig {
     /// Market path: `spot`, `futures/um` or `futures/cm`.
     pub(crate) market: Market,
-    /// Symbols to download, kept **verbatim** as the user wrote them.
-    ///
-    /// The uppercased / sorted / deduplicated view is produced on demand by
-    /// [`AppConfig::normalized_symbols`]; the raw value is kept so validation
-    /// errors can quote exactly what the user typed.
+    /// Symbols as the user wrote them; validation uppercases and deduplicates
+    /// them, but the raw spelling is kept here so errors can quote it.
     pub(crate) symbol: Vec<String>,
     /// Optional inclusive start date override.
     #[serde(default)]
@@ -53,7 +50,7 @@ pub(crate) struct AppConfig {
     #[serde(default)]
     pub(crate) not_found_pct_threshold: Option<f64>,
     /// Dataset entries to download.
-    pub(crate) dataset: Vec<DatasetConfig>,
+    pub(crate) dataset: Vec<RawDataset>,
 }
 
 fn default_output_dir() -> PathBuf {
@@ -62,30 +59,4 @@ fn default_output_dir() -> PathBuf {
 
 fn default_concurrency() -> usize {
     64
-}
-
-impl AppConfig {
-    /// Load and validate configuration from a TOML file.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::Config`] when the file cannot be read, the TOML is
-    /// invalid, or validation fails. Every such error carries `path`.
-    pub(crate) async fn load(path: &Path) -> Result<Self, AppError> {
-        let raw = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| AppError::Config {
-                path: Some(path.to_path_buf()),
-                message: e.to_string(),
-            })?;
-        Self::parse_str(&raw, path)
-    }
-
-    pub(super) fn parse_str(raw: &str, path: &Path) -> Result<Self, AppError> {
-        let cfg: Self = toml::from_str(raw).map_err(|e| AppError::Config {
-            path: Some(path.to_path_buf()),
-            message: e.to_string(),
-        })?;
-        cfg.validate(path)
-    }
 }

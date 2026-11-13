@@ -1,6 +1,6 @@
 //! One symbol/job pair: resolve its window, build tasks, download them.
 
-use crate::config::AppConfig;
+use crate::config::Config;
 use crate::dataset::DownloadJob;
 use crate::prepare::PreparedRun;
 
@@ -16,7 +16,7 @@ pub(super) struct PairCtx<'a> {
     /// Resources shared by every pair in the batch.
     pub(super) prepared: &'a PreparedRun,
     /// Validated configuration.
-    pub(super) cfg: &'a AppConfig,
+    pub(super) cfg: &'a Config,
 }
 
 /// Download one symbol/job pair.
@@ -31,7 +31,7 @@ pub(super) struct PairCtx<'a> {
 /// download.
 #[tracing::instrument(
     skip(client, ctx),
-    fields(market = %ctx.cfg.market, symbol = %symbol, job = %job)
+    fields(market = %ctx.cfg.market(), symbol = %symbol, job = %job)
 )]
 pub(super) async fn run_one(
     client: &reqwest::Client,
@@ -42,7 +42,7 @@ pub(super) async fn run_one(
 ) -> Result<DownloadStats, DownloadFailure> {
     // Monthly jobs align down to the first day of the month and stop at the
     // last *complete* month; daily jobs use the resolved day range as-is.
-    let raw_start = crate::start_dates::resolve_start(ctx.cfg.start, ctx.sym_start);
+    let raw_start = crate::start_dates::resolve_start(ctx.cfg.start(), ctx.sym_start);
     let start = job.period.start_of_period(raw_start);
     let end = job.period.last_complete_start(ctx.prepared.end);
 
@@ -71,13 +71,13 @@ pub(super) async fn run_one(
     // rule twice.
     let tasks = tasks::build_download_tasks(
         &ctx.prepared.endpoints.archive_files,
-        ctx.cfg.market,
+        ctx.cfg.market(),
         symbol,
         job,
         start,
         ctx.prepared.end,
         &ctx.prepared.local,
-        &ctx.cfg.output_dir,
+        ctx.cfg.output_dir(),
     );
 
     if tasks.is_empty() {

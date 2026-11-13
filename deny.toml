@@ -1,0 +1,41 @@
+# cargo-deny configuration.
+#
+# The license list is the set of permissive licenses currently present in the
+# dependency graph (`cargo metadata`); keep it in sync when a dependency adds a
+# new license. Weak-copyleft licenses are deliberately not blanket-allowed: a
+# dependency that only offers one must be reviewed first.
+
+[advisories]
+version = 2
+# A yanked crate is a warning, not an automatic failure; the lockfile and CI
+# reproducibility check still catch an unexpected pin.
+yanked = "warn"
+# Add an entry only with the advisory ID, a reason, and a review date.
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
