@@ -60,10 +60,10 @@ impl RunOptions {
 /// ```no_run
 /// use std::path::Path;
 ///
-/// # async fn demo() -> Result<(), bdd_core::AppError> {
+/// # async fn demo() -> Result<(), bdd::AppError> {
 /// // Downloads every symbol/job pair declared in `config.toml` into the
 /// // configured output directory, skipping the files already on disk.
-/// bdd_core::run(Path::new("config.toml")).await?;
+/// bdd::run(Path::new("config.toml")).await?;
 /// # Ok(())
 /// # }
 /// ```

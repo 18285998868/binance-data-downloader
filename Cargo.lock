@@ -159,29 +159,6 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 name = "bdd"
 version = "0.1.0"
 dependencies = [
- "bdd-core",
- "tempfile",
- "tokio",
- "zip",
-]
-
-[[package]]
-name = "bdd-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bdd",
- "clap",
- "rayon",
- "tokio",
- "tracing-subscriber",
- "walkdir",
-]
-
-[[package]]
-name = "bdd-core"
-version = "0.1.0"
-dependencies = [
  "ahash",
  "backon",
  "chrono",
@@ -200,6 +177,19 @@ dependencies = [
  "walkdir",
  "wiremock",
  "zip",
+]
+
+[[package]]
+name = "bdd-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bdd",
+ "clap",
+ "rayon",
+ "tokio",
+ "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]

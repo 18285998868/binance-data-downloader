@@ -73,7 +73,7 @@ impl std::error::Error for FailureReport {}
 /// # Examples
 ///
 /// ```
-/// use bdd_core::AppError;
+/// use bdd::AppError;
 ///
 /// let err = AppError::NotFound {
 ///     url: "https://data.binance.vision/x.zip".into(),

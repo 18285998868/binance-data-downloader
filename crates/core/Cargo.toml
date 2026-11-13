@@ -1,10 +1,10 @@
 [package]
-name = "bdd-core"
+name = "bdd"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Core download engine for the Binance public data archive."
+description = "Download spot and futures datasets from the Binance public data archive."
 
 [dependencies]
 tokio.workspace = true
@@ -28,6 +28,7 @@ ahash.workspace = true
 tempfile = "3"
 wiremock = "0.6"
 tokio = { workspace = true, features = ["time"] }
+zip.workspace = true
 
 [lints]
 workspace = true

@@ -1,7 +1,4 @@
-//! Core engine for the Binance public data archive downloader.
-//!
-//! The stable embedder-facing facade is the `bdd` crate; this crate holds the
-//! pipeline and its implementation details.
+//! Binance public data archive downloader for spot, USDⓈ-M and COIN-M.
 //!
 //! Downloads any of the eleven archive datasets (aggTrades, trades, klines,
 //! bookDepth, bookTicker, fundingRate, liquidationSnapshot, metrics and the
