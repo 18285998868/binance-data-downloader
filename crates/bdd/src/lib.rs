@@ -1,44 +1,19 @@
-//! Binance public data archive downloader for spot, USDⓈ-M and COIN-M.
+//! Public facade over the download engine.
 //!
-//! Downloads any of the eleven archive datasets (aggTrades, trades, klines,
-//! bookDepth, bookTicker, fundingRate, liquidationSnapshot, metrics and the
-//! three futures price-kline families) and saves the zip files in a tree that
-//! mirrors the web page path exactly.
+//! The pipeline lives in `bdd-core`; this crate is the stable entry point
+//! embedders depend on. Keeping the facade thin leaves room for future
+//! host-facing APIs without changing the engine.
 //!
 //! The crate documentation is the project README, so that the published docs
 //! and the repository README can never drift apart.
 //!
-//! Module layout: `app` is the five-step pipeline — `config`, `prepare`,
-//! `start_dates`, `download` and `report`; supporting modules are `backoff`,
-//! `cache`, `cancel`, `dataset`, `endpoints`, `error`, `limits`, `scan` and
-//! `verify`. The `binance-data-verify` binary lives in the `bdd-cli` package
-//! and shares [`verify_zip`] with the download pipeline.
-//!
-//! The modules are an implementation detail; the public surface is [`run`],
-//! [`run_with_options`], [`RunOptions`], [`verify_zip`], [`AppError`] and
-//! [`FailureReport`].
+//! ```no_run
+//! # async fn demo() -> Result<(), bdd::AppError> {
+//! bdd::run(std::path::Path::new("config.toml")).await?;
+//! # Ok(())
+//! # }
+//! ```
 
 #![doc = include_str!("../../../README.md")]
 
-mod app;
-mod backoff;
-mod cache;
-mod cancel;
-mod config;
-mod dataset;
-mod download;
-mod endpoints;
-mod error;
-mod limits;
-mod prepare;
-mod report;
-mod scan;
-mod start_dates;
-mod verify;
-
-#[cfg(test)]
-mod pipeline_tests;
-
-pub use app::{RunOptions, run, run_with_options};
-pub use error::{AppError, FailureReport};
-pub use verify::verify_zip;
+pub use bdd_core::{AppError, FailureReport, RunOptions, run, run_with_options, verify_zip};

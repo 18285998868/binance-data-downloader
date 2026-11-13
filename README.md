@@ -211,7 +211,7 @@ https://s3-ap-northeast-1.amazonaws.com/data.binance.vision?delimiter=/&max-keys
 ## 架构
 
 ```text
-crates/bdd/src/         核心库 bdd
+crates/bdd-core/src/     下载引擎（五步 pipeline 与全部实现）
   lib.rs                公开导出 run / RunOptions / verify_zip / AppError / FailureReport
   app.rs                五步流程：config -> prepare -> start_dates -> download -> report
   config/
@@ -244,6 +244,7 @@ crates/bdd/src/         核心库 bdd
   limits.rs             RLIMIT_NOFILE → 实际并发
   endpoints.rs          生产/测试端点
   verify.rs             zip 中央目录校验
+crates/bdd/src/lib.rs   门面 bdd：re-export 引擎的稳定公开 API
 crates/bdd-cli/src/     CLI 包 bdd-cli
   main.rs               入口：tracing、-c/--config/--verify
   cli.rs                clap 参数
@@ -263,6 +264,6 @@ cargo test --workspace --all-features --locked
   `rust-version`，理由见文件内注释。
 - 内部 API 一律 `pub(crate)`；`bdd` 的公开面仅 `run` / `run_with_options` /
   `RunOptions` / `verify_zip` / `AppError` / `FailureReport`。
-- crate 根文档即本 README（`#![doc = include_str!("../../../README.md")]`）。
+- `bdd` 与 `bdd-core` 的 crate 根文档即本 README（`#![doc = include_str!("../../../README.md")]`）。
 - 测试覆盖：11 种数据集能力矩阵、路径/文件名、日/月迭代、配置校验、起始日三态、
   URL/任务生成、缓存、扫描、重试分类、原子落盘、取消与整套编排分支。
