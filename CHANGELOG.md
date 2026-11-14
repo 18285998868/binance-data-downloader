@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 支持通过环境变量配置代理：reqwest 启用 `socks` 与 `system-proxy`，读取
+  `ALL_PROXY` / `HTTPS_PROXY` / `NO_PROXY`，可用 `socks5h://` 让 DNS 也走代理，
+  并用 `NO_PROXY` 让归档下载直连、只有清单与 API 走代理。
+
 ### 变更
 
 - crate 重命名：`bdd` → `binance-data-core`，`bdd-cli` → `binance-data-cli`；

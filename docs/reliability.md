@@ -83,3 +83,19 @@ not_found_pct_threshold = 50.0
 RUST_LOG=info ./target/release/binance-data-downloader -c config.toml
 echo $?
 ```
+
+## 模块九：代理
+
+1. HTTP 客户端读取 `ALL_PROXY` / `HTTPS_PROXY` / `NO_PROXY`（大小写均可），由 reqwest 的
+   `system-proxy` 特性提供。
+2. `socks` 特性支持 `socks4` / `socks4a` / `socks5` / `socks5h`；只有 `socks5h` 连 DNS
+   一起交给代理，可绕过被污染的解析。
+3. `NO_PROXY` 按 curl 规则匹配，放行 `data.binance.vision` 可让归档下载直连，只有
+   清单与 API 走代理。
+4. 代理变量属于运行环境，不写进 TOML，也不参与配置校验。
+
+```bash
+HTTPS_PROXY=socks5h://127.0.0.1:1080 \
+NO_PROXY=data.binance.vision,127.0.0.1,localhost,::1 \
+RUST_LOG=info ./target/release/binance-data-downloader -c config.toml
+```

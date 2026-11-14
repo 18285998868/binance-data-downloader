@@ -20,6 +20,7 @@ RUST_LOG=info ./target/release/binance-data-downloader -c config.toml --verify
 ```
 
 - 已存在的 `.zip` 按相对路径跳过，重复执行安全，可用于增量补全。
+- 需要代理时用 `HTTPS_PROXY` / `NO_PROXY` 控制，见[可靠性](docs/reliability.md#模块九代理)。
 - `Ctrl-C` 立即停止调度与在途下载；重跑从已完成文件处续跑，取消不算失败。
 - 日志由 `RUST_LOG` 控制（缺省 `info`）。
 - 成功与被取消的退出码为 `0`，任何失败为 `1`。
