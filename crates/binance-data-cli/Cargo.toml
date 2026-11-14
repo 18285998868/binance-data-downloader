@@ -1,0 +1,32 @@
+[package]
+name = "binance-data-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Command-line entry points for the Binance public data downloader."
+
+[[bin]]
+name = "binance-data-downloader"
+path = "src/main.rs"
+
+[[bin]]
+name = "binance-data-verify"
+path = "src/bin/verify/main.rs"
+
+[dependencies]
+binance-data-core = { path = "../binance-data-core", version = "0.1.0" }
+anyhow.workspace = true
+clap.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+zip.workspace = true
+
+[lints]
+workspace = true

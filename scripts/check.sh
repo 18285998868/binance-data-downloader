@@ -91,8 +91,8 @@ main() {
 	info "gate: docs"
 	run env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features "${cargo_flags[@]}"
 
-	info "gate: benches"
-	run cargo bench --workspace --no-run "${cargo_flags[@]}"
+	# No `cargo bench --no-run`: the workspace has no benchmarks, so the step
+	# was a no-op. Add it back together with the first `benches/` target.
 
 	if command -v cargo-deny >/dev/null 2>&1; then
 		info "gate: cargo-deny"

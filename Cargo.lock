@@ -156,14 +156,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
-name = "bdd"
+name = "binance-data-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "binance-data-core",
+ "clap",
+ "rayon",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing-subscriber",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "binance-data-core"
 version = "0.1.0"
 dependencies = [
  "ahash",
  "backon",
  "chrono",
  "futures",
- "redb",
  "reqwest",
  "rlimit",
  "roxmltree",
@@ -177,19 +192,6 @@ dependencies = [
  "walkdir",
  "wiremock",
  "zip",
-]
-
-[[package]]
-name = "bdd-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bdd",
- "clap",
- "rayon",
- "tokio",
- "tracing-subscriber",
- "walkdir",
 ]
 
 [[package]]
@@ -1238,15 +1240,6 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
-]
-
-[[package]]
-name = "redb"
-version = "4.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b317ef681e18f6091efbfab532eaf924a135c492d9d0299d0fbfae07e92a39b"
-dependencies = [
- "libc",
 ]
 
 [[package]]
